@@ -165,8 +165,7 @@
 
 // includes, project
 #include <cufft.h>
-#include <cutil_inline.h>
-#include <cutil.h>
+#include "cuda_safecalls.h"
 
 // Create ThreadsPerBlock constant
 const int T_PER_B = 1024;
@@ -426,11 +425,12 @@ int main(int argc, char** argv)
 		   testPrime, h_LO_BITS, h_HI_BITS, log(1.0*signalSize)/log(2.0), signalSize);
 	printf("  NUM_BLOCKS = %d, T_PER_B = %d\n", signalSize/T_PER_B, T_PER_B);
 
-    unsigned int timer = 0;
-	cutilCheckError( cutCreateTimer( &timer ));
-	
 	// START timer now
-	cutilCheckError( cutStartTimer( timer));
+	cudaEvent_t errorTrial_start, errorTrial_stop, mersenneTest_start, mersenneTest_stop;
+	cutilSafeCall(cudaEventCreate(&errorTrial_start));
+	cutilSafeCall(cudaEventCreate(&errorTrial_stop));
+	cutilSafeCall(cudaEventRecord(errorTrial_start, 0)); 
+
 	
 	// errorTrial() called to give an estimate of convolution sizes and errors,
 	//  as well as FFT timings and rebalancing time.
@@ -439,9 +439,13 @@ int main(int argc, char** argv)
 	int trialFraction = 10000;
 	float elapsedMsecDEV = errorTrial(testPrime/trialFraction, testPrime, signalSize);
 
+	// stop the timer
+	cutilSafeCall(cudaEventRecord(errorTrial_stop, 0));
+	cutilSafeCall(cudaEventSynchronize(errorTrial_stop));
+
 	//get the the total elapsed time in ms
-    cutilCheckError( cutStopTimer( timer ));
-    float elapsedMsec = cutGetTimerValue( timer );
+	float elapsedMsec;
+	cutilSafeCall(cudaEventElapsedTime(&elapsedMsec, errorTrial_start, errorTrial_stop));
 
 	printf("\nTiming:  To test M%d"
 		   "\n  elapsed time :      %10.f msec = %.1f sec"
@@ -452,28 +456,27 @@ int main(int argc, char** argv)
 		   elapsedMsecDEV*trialFraction, elapsedMsecDEV*trialFraction/1000,
 		   elapsedMsecDEV*testPrime, elapsedMsecDEV*testPrime/1000);
 
-	CUT_SAFE_CALL(cutDeleteTimer(timer));
-
 	printf("\nBeginning full test of M%d\n", testPrime);
 	
-	timer = 0;
-   	cutilCheckError( cutCreateTimer( &timer ));
-	cutilCheckError( cutStartTimer( timer));
+	cutilSafeCall(cudaEventCreate(&mersenneTest_start));
+	cutilSafeCall(cudaEventCreate(&mersenneTest_stop));
+	cutilSafeCall(cudaEventRecord(mersenneTest_start, 0));
 
 	mersenneTest(testPrime, signalSize);
 
 	//get the the total elapsed time in ms
-    cutilCheckError( cutStopTimer( timer ));
-    elapsedMsec = cutGetTimerValue( timer );
+	cutilSafeCall(cudaEventRecord(mersenneTest_stop, 0));
+	cutilSafeCall(cudaEventSynchronize(mersenneTest_stop));
+
+    cutilSafeCall(cudaEventElapsedTime(&elapsedMsec, mersenneTest_start, mersenneTest_stop));
+
 
 	printf("\nTimings:  To test M%d"
 		   "\n  elapsed time :      %10.f msec = %.1f sec\n",
 		   testPrime, elapsedMsec, elapsedMsec/1000);
 
-	CUT_SAFE_CALL(cutDeleteTimer(timer));
-
-	cudaThreadExit();	
-	cutilExit(argc, argv);
+	cutilDeviceReset();
+	exit(EXIT_SUCCESS);
 }
 
 /**
