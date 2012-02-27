@@ -243,6 +243,10 @@ int h_BASE_HI;
 int h_LO_MODMASK;
 int h_HI_MODMASK;
 
+// some global flags
+int opt_quiet = 0;
+int opt_verbose = 0;
+
 __constant__ int LO_BITS;
 __constant__ int HI_BITS;
 __constant__ int BASE_LO;
@@ -377,7 +381,7 @@ void mersenneTest(int testPrime, int signalSize);
 ////////////////////////////////////////////////////////////////////////////////
 // Program main
 ////////////////////////////////////////////////////////////////////////////////
-int main(int argc, char** argv) 
+int main(int argc, char* argv[]) 
 {
 	int deviceCount = 0;
 	cudaError_t error_id = cudaGetDeviceCount(&deviceCount);
@@ -402,11 +406,47 @@ int main(int argc, char** argv)
 	fprintf(stderr, "but we're going to use device 0 by default.\n");
 	cudaSetDevice(0);//cutGetMaxGflopsDeviceId());
 
-	/**
-	 * CURRENTLY, SET THESE AT COMPILE TIME
-	 */
-	int testPrime = M_1257787;
-	int signalSize = 65536;
+	int signalSize = 0, testPrime = 0;
+	int c;
+	while (( c = getopt(argc, argv, "vqf:n:")) != -1) {
+		switch (c) {
+			case 'v':
+				opt_verbose = 1;
+				opt_quiet = 0;
+				break;
+			case 'q':
+				opt_verbose = 0;
+				opt_quiet = 1;
+				break;
+			case 'f':
+				signalSize = atoi(optarg);
+				printf("signalSize %d\n", signalSize);
+				break;
+			case 'n':
+				testPrime = atoi(optarg);
+				printf("testPrime %d\n", testPrime);
+				break;
+			case '?':
+				if (optopt == 'f' || optopt == 'n')
+					fprintf(stderr, "Option -%c requires an argument\n", optopt);
+				else if (isprint (optopt))
+					fprintf(stderr, "Unknown option `-%c'.\n", optopt);
+				break;
+			default:
+				break;
+		}
+	}
+
+	for (int index = optind; index < argc; index++) {
+		if (testPrime == 0 && (strlen(argv[index]) == strspn(argv[index],"0123456789"))) {
+				testPrime = atoi(argv[index]);
+		}
+		else
+				printf ("Non-option argument %s\n", argv[index]);
+	}
+	if ( testPrime == 0 || signalSize == 0)
+			abort();
+
 	// BEGIN by initializing constant memory on device
 	initConstantSymbols(testPrime, signalSize);
 
@@ -443,9 +483,18 @@ int main(int argc, char** argv)
 	cutilSafeCall(cudaEventRecord(errorTrial_stop, 0));
 	cutilSafeCall(cudaEventSynchronize(errorTrial_stop));
 
-	//get the the total elapsed time in ms
+	//get the the total elapsed time in ms. negative value returned on abort condition
 	float elapsedMsec;
 	cutilSafeCall(cudaEventElapsedTime(&elapsedMsec, errorTrial_start, errorTrial_stop));
+
+	cutilSafeCall(cudaEventDestroy(errorTrial_start));
+	cutilSafeCall(cudaEventDestroy(errorTrial_stop));
+
+	if (elapsedMsecDEV < 0.0f) {
+			printf ("Encountered an error in the errorTrial test. Aborting\n");
+			cutilDeviceReset();
+			exit(EXIT_FAILURE);
+	}
 
 	printf("\nTiming:  To test M%d"
 		   "\n  elapsed time :      %10.f msec = %.1f sec"
@@ -469,7 +518,9 @@ int main(int argc, char** argv)
 	cutilSafeCall(cudaEventSynchronize(mersenneTest_stop));
 
     cutilSafeCall(cudaEventElapsedTime(&elapsedMsec, mersenneTest_start, mersenneTest_stop));
-
+	
+	cutilSafeCall(cudaEventDestroy(mersenneTest_start));
+	cutilSafeCall(cudaEventDestroy(mersenneTest_stop));
 
 	printf("\nTimings:  To test M%d"
 		   "\n  elapsed time :      %10.f msec = %.1f sec\n",
@@ -708,19 +759,21 @@ float errorTrial(int testIterations, int testPrime, int signalSize) {
 	computeBitsPerWordVectors(h_bitsPerWord8, h_bitsPerWord, signalSize);
 	cutilSafeCall(cudaMemcpy(bitsPerWord8, h_bitsPerWord8, bpw_size, cudaMemcpyHostToDevice));
 
-	for (int i = 0; i < 20; i++) {
-		printf("word[%d] numbits = %d\n", i, h_bitsPerWord[i]);
-		printf("numbits of this and following 7 are: ");
-		for (int bit = 1; bit < 256; bit *= 2)
-			printf("%d ", bit & h_bitsPerWord8[i] ? h_HI_BITS : h_LO_BITS);
-		printf("\n");
-	}
-	for (int i = signalSize - 8; i < signalSize; i++) {
-		printf("word[%d] numbits = %d\n", i, h_bitsPerWord[i]);
-		printf("numbits of this and following 7 are: ");
-		for (int bit = 1; bit < 256; bit *= 2)
-			printf("%d ", bit & h_bitsPerWord8[i] ? h_HI_BITS : h_LO_BITS);
-		printf("\n");
+	if (opt_verbose) {
+		for (int i = 0; i < 20; i++) {
+			printf("word[%d] numbits = %d\n", i, h_bitsPerWord[i]);
+			printf("numbits of this and following 7 are: ");
+			for (int bit = 1; bit < 256; bit *= 2)
+				printf("%d ", bit & h_bitsPerWord8[i] ? h_HI_BITS : h_LO_BITS);
+			printf("\n");
+		}
+		for (int i = signalSize - 8; i < signalSize; i++) {
+			printf("word[%d] numbits = %d\n", i, h_bitsPerWord[i]);
+			printf("numbits of this and following 7 are: ");
+			for (int bit = 1; bit < 256; bit *= 2)
+				printf("%d ", bit & h_bitsPerWord8[i] ? h_HI_BITS : h_LO_BITS);
+			printf("\n");
+		}
 	}
 	
 	double *h_A = (double *) malloc(signalSize*sizeof(double));
@@ -730,11 +783,13 @@ float errorTrial(int testIterations, int testPrime, int signalSize) {
 	computeWeightVectors(h_A, h_Ainv, testPrime, signalSize);
 	cutilSafeCall(cudaMemcpy(dev_A, h_A, sizeof(double)*signalSize, cudaMemcpyHostToDevice));
 	cutilSafeCall(cudaMemcpy(dev_Ainv, h_Ainv, sizeof(double)*signalSize, cudaMemcpyHostToDevice));
-	printf("weight vector looks like:\n");
-	for (int i = 0; i < 20; i++) 
-		printf("a[%d] = %f\n", i, h_A[i]);
-	for (int i = 0; i < 20; i++) 
-		printf("ainv[%d] = %f\n", i, h_Ainv[i]);
+	if (opt_verbose) {
+		printf("weight vector looks like:\n");
+		for (int i = 0; i < 20; i++) 
+			printf("a[%d] = %f\n", i, h_A[i]);
+		for (int i = 0; i < 20; i++) 
+			printf("ainv[%d] = %f\n", i, h_Ainv[i]);
+	}
 
 	// load the int array to the doubles for FFT
 	// This is already balanced, and already multiplied by a_0 = 1 for DWT
@@ -769,7 +824,8 @@ float errorTrial(int testIterations, int testPrime, int signalSize) {
 			cutilSafeCall(cudaEventSynchronize(stop));
 			float elapsedTime;
 			cutilSafeCall(cudaEventElapsedTime(&elapsedTime, start, stop));
-			printf("Time for FFT, squaring, INV FFT:  %3.3f ms\n", elapsedTime);
+			if (opt_verbose)
+					printf("Time for FFT, squaring, INV FFT:  %3.3f ms\n", elapsedTime);
 			totalTime += elapsedTime;
 			cutilSafeCall(cudaEventDestroy(start));
 			cutilSafeCall(cudaEventDestroy(stop));
@@ -777,13 +833,20 @@ float errorTrial(int testIterations, int testPrime, int signalSize) {
 			// ERROR TESTS
 			invDWTproductMinus2ERROR<<<numBlocks, T_PER_B>>>(llint_signal, d_signal, dev_Ainv, signalSize);
 			computeErrorVector<<<numBlocks, T_PER_B>>>(dev_errArr, d_signal, signalSize);
-			float maxerr = findMaxErrorHOST(dev_errArr, host_errArr, signalSize); 
-			printf("\n[%d/50]: iteration %d: max abs error = %f", iter/(testPrime/50), iter, maxerr);
+			float maxerr = findMaxErrorHOST(dev_errArr, host_errArr, signalSize);
+			if (maxerr >= 0.5f) {
+					printf("max abs error = %f, is too high. Exiting\n", maxerr);
+					totalTime = -1;
+					break;
+			} else if (opt_verbose)
+					printf("\n[%d/50]: iteration %d: max abs error = %f", iter/(testPrime/50), iter, maxerr);
 
 			computeMaxBitVector<<<numBlocks, T_PER_B>>>(dev_errArr, llint_signal, signalSize);
 			float maxBitVector = findMaxErrorHOST(dev_errArr, host_errArr, signalSize);
-			printf("\n[%d/50]: iteration %d: max Bit Vector = %f", iter/(testPrime/50), iter, maxBitVector);
-			fflush(stdout);
+			if (opt_verbose) {
+					printf("\n[%d/50]: iteration %d: max Bit Vector = %f", iter/(testPrime/50), iter, maxBitVector);
+					fflush(stdout);
+			}
 
 			// Time rebalancing
 			cutilSafeCall(cudaEventCreate(&start));
@@ -793,7 +856,8 @@ float errorTrial(int testIterations, int testPrime, int signalSize) {
 			cutilSafeCall(cudaEventRecord(stop, 0));
 			cutilSafeCall(cudaEventSynchronize(stop));
 			cutilSafeCall(cudaEventElapsedTime(&elapsedTime, start, stop));
-			printf("\nTime to rebalance llint:  %3.3f ms\n", elapsedTime);
+			if (opt_verbose)
+					printf("\nTime to rebalance llint:  %3.3f ms\n", elapsedTime);
 			totalTime += elapsedTime;
 			cutilSafeCall(cudaEventDestroy(start));
 			cutilSafeCall(cudaEventDestroy(stop));
@@ -834,7 +898,8 @@ float errorTrial(int testIterations, int testPrime, int signalSize) {
 	cutilSafeCall(cudaEventSynchronize(stop));
 	float elapsedTime;
 	cutilSafeCall(cudaEventElapsedTime(&elapsedTime, start, stop));
-	printf("\nTime to rebalance and write-back:  %3.1f ms\n", elapsedTime);
+	if (opt_verbose)
+			printf("\nTime to rebalance and write-back:  %3.1f ms\n", elapsedTime);
 	cutilSafeCall(cudaEventDestroy(start));
 	cutilSafeCall(cudaEventDestroy(stop));
 
