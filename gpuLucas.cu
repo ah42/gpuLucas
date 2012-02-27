@@ -246,6 +246,8 @@ int h_HI_MODMASK;
 // some global flags
 int opt_quiet = 0;
 int opt_verbose = 0;
+char program_name[] = "gpuLucas";
+char program_version[] = "version";
 
 __constant__ int LO_BITS;
 __constant__ int HI_BITS;
@@ -378,11 +380,76 @@ void setSliceAndDice(int carryDigits) {
 float errorTrial(int testIterations, int testPrime, int signalSize);
 void mersenneTest(int testPrime, int signalSize);
 
+/**
+ * print_help()
+ */
+void print_help() {
+	fprintf(stderr, "%s (v%s):\n\n", program_name, program_version);
+	fprintf(stderr, "-v\tenable verbose output\n");
+	fprintf(stderr, "-q\tdisable verbose output\n");
+	fprintf(stderr, "-f\tspecify signalLength (FFT)\n");
+	fprintf(stderr, "-n\tspecify number to be tested\n");
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // Program main
 ////////////////////////////////////////////////////////////////////////////////
-int main(int argc, char* argv[]) 
-{
+int main(int argc, char* argv[]) {
+	int signalSize = 0, testPrime = 0;
+	int c;
+	while (( c = getopt(argc, argv, "hvqf:n:")) != -1) {
+		switch (c) {
+			case 'h':
+				print_help();
+				return(1);
+				break;
+			case 'v':
+				opt_verbose = 1;
+				opt_quiet = 0;
+				break;
+			case 'q':
+				opt_verbose = 0;
+				opt_quiet = 1;
+				break;
+			case 'f':
+				signalSize = atoi(optarg);
+				printf("signalSize %d\n", signalSize);
+				break;
+			case 'n':
+				testPrime = atoi(optarg);
+				printf("testPrime %d\n", testPrime);
+				break;
+			case '?':
+				if (optopt == 'f' || optopt == 'n') {
+					print_help();
+					fprintf(stderr, "Option -%c requires an argument\n", optopt);
+					return(-1);
+				} else if (isprint (optopt)) {
+					print_help();
+					fprintf(stderr, "Unknown option `-%c'.\n", optopt);
+					return(-1);
+				}	
+				break;
+			default:
+				break;
+		}
+	}
+
+	for (int index = optind; index < argc; index++) {
+		if (testPrime == 0 && (strlen(argv[index]) == strspn(argv[index],"0123456789"))) {
+				testPrime = atoi(argv[index]);
+		} else {
+				print_help();
+				printf ("Non-option argument %s\n", argv[index]);
+				return(-1);
+		}
+	}
+	if ( testPrime == 0 || signalSize == 0) {
+			print_help();
+			fprintf(stderr, "testPrime or signalSize not specified, aborting\n");
+			abort();
+	}
+
 	int deviceCount = 0;
 	cudaError_t error_id = cudaGetDeviceCount(&deviceCount);
 
@@ -406,46 +473,6 @@ int main(int argc, char* argv[])
 	fprintf(stderr, "but we're going to use device 0 by default.\n");
 	cudaSetDevice(0);//cutGetMaxGflopsDeviceId());
 
-	int signalSize = 0, testPrime = 0;
-	int c;
-	while (( c = getopt(argc, argv, "vqf:n:")) != -1) {
-		switch (c) {
-			case 'v':
-				opt_verbose = 1;
-				opt_quiet = 0;
-				break;
-			case 'q':
-				opt_verbose = 0;
-				opt_quiet = 1;
-				break;
-			case 'f':
-				signalSize = atoi(optarg);
-				printf("signalSize %d\n", signalSize);
-				break;
-			case 'n':
-				testPrime = atoi(optarg);
-				printf("testPrime %d\n", testPrime);
-				break;
-			case '?':
-				if (optopt == 'f' || optopt == 'n')
-					fprintf(stderr, "Option -%c requires an argument\n", optopt);
-				else if (isprint (optopt))
-					fprintf(stderr, "Unknown option `-%c'.\n", optopt);
-				break;
-			default:
-				break;
-		}
-	}
-
-	for (int index = optind; index < argc; index++) {
-		if (testPrime == 0 && (strlen(argv[index]) == strspn(argv[index],"0123456789"))) {
-				testPrime = atoi(argv[index]);
-		}
-		else
-				printf ("Non-option argument %s\n", argv[index]);
-	}
-	if ( testPrime == 0 || signalSize == 0)
-			abort();
 
 	// BEGIN by initializing constant memory on device
 	initConstantSymbols(testPrime, signalSize);
