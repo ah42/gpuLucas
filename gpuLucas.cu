@@ -364,6 +364,7 @@ void mersenneTest(unsigned int testPrime, unsigned int signalSize);
  */
 void print_help() {
 	fprintf(stderr, "%s (v%s):\n\n", program_name, program_version);
+	fprintf(stderr, "-d\tspecify CUDA device to use\n");
 	fprintf(stderr, "-v\tenable verbose output\n");
 	fprintf(stderr, "-q\tdisable verbose output\n");
 	fprintf(stderr, "-f\tspecify signalLength (FFT)\n");
@@ -376,7 +377,8 @@ void print_help() {
 int main(int argc, char* argv[]) {
 	int signalSize = 0, testPrime = 0;
 	int c;
-	while (( c = getopt(argc, argv, "hvqf:n:")) != -1) {
+	int use_device = 0;
+	while (( c = getopt(argc, argv, "hvqf:n:d:")) != -1) {
 		switch (c) {
 			case 'h':
 				print_help();
@@ -391,12 +393,12 @@ int main(int argc, char* argv[]) {
 				break;
 			case 'f':
 				signalSize = atoi(optarg);
-				printf("signalSize %d\n", signalSize);
 				break;
 			case 'n':
 				testPrime = atoi(optarg);
-				printf("testPrime %d\n", testPrime);
 				break;
+			case 'd':
+
 			case '?':
 				if (optopt == 'f' || optopt == 'n') {
 					print_help();
@@ -435,21 +437,23 @@ int main(int argc, char* argv[]) {
 		fprintf(stderr, "cudaGetDeviceCount returned %d\n-> %s\n", (int)error_id, cudaGetErrorString(error_id) );
 	}
 	// This function call returns 0 if there are no CUDA capable devices.
-	if (deviceCount == 0)
+	if (deviceCount == 0) {
 		fprintf(stderr, "There is no device supporting CUDA\n");
-	else
+		return(-1);
+	} else
 		fprintf(stderr, "Found %d CUDA Capable device(s)\n", deviceCount);
 
 	int dev;
+	cudaDeviceProp deviceProp;
 	for (dev = 0; dev < deviceCount; ++dev) {
-		cudaDeviceProp deviceProp;
 		cudaGetDeviceProperties(&deviceProp, dev);
-
-		fprintf(stderr, "\nDevice %d: \"%s\"\n", dev, deviceProp.name);
+		fprintf(stderr, "\tDevice %d: %s\n", dev, deviceProp.name);
 	}
-	fprintf(stderr, "\n and deviceID of max GFLOPS device is %d\n", cutGetMaxGflopsDeviceId());
-	fprintf(stderr, "but we're going to use device 0 by default.\n");
-	cudaSetDevice(0);//cutGetMaxGflopsDeviceId());
+
+	// Chosen device = use_device
+	cudaGetDeviceProperties(&deviceProp, use_device);
+	fprintf(stderr, "Using selected device %d: %s\n", use_device, deviceProp.name);
+	cudaSetDevice(use_device);
 
 
 	// BEGIN by initializing constant memory on device
