@@ -171,27 +171,6 @@
 const int T_PER_B = 1024;
 
 // NOTE: testPrimes below 9689 generate runlengths < 1024, which breaks the code if T_PER_B = 1024
-const int M_9689 = 9689;
-const int M_9941 = 9941;
-// M_23207 is not prime
-const int M_23207 = 23207;
-const int M_23209 = 23209;
-const int M_44497 = 44497; 
-const int M_86243 = 86243; 
-const int M_216091 = 216091;
-//M_432199 is not a prime, but roughly twice size of M216091
-const int M_432199 = 432199;
-const int M_756839 = 756839; // M(32)
-const int M_859433 = 859433; // M(33) // FFT runlength 49152
-const int M_1257787 = 1257787; // M(34)  // FFT runlength 65536 = 2^16
-const int M_3021377 = 3021377; // M(36), // FFT runlength 163840 = 2^17 + 2^15 = 5*2^15 // 1998 (GIMPS)
-const int M_6972593 = 6972593; // M(38), 1999 (GIMPS)
-const int M_13466917 = 13466917; // M(39), 2001 (GIMPS)
-const int M_32582657 = 32582657; // M(44), 2006 (GIMPS)
-const int M_42643801 = 42643801; // FFT runlength 2359296 = 2^21 + 2^18 = 2^18*3^2.
-const int M_43112609 = 43112609; // FFT runlength 2359296 = 2^21 + 2^18 = 2^18*3^2.
-// M_86225219 is not prime
-const int M_86225219 = 86225219;
 
 /**
  * Currently need to set testPrime and signalSize in main()
@@ -377,8 +356,8 @@ void setSliceAndDice(int carryDigits) {
  *    the average time per Lucas-Lehmer iteration based on timing
  *    of convolution-multiply and rebalancing functions
  */
-float errorTrial(int testIterations, int testPrime, int signalSize);
-void mersenneTest(int testPrime, int signalSize);
+float errorTrial(unsigned int testIterations, unsigned int testPrime, unsigned int signalSize);
+void mersenneTest(unsigned int testPrime, unsigned int signalSize);
 
 /**
  * print_help()
@@ -402,7 +381,6 @@ int main(int argc, char* argv[]) {
 			case 'h':
 				print_help();
 				return(1);
-				break;
 			case 'v':
 				opt_verbose = 1;
 				opt_quiet = 0;
@@ -485,7 +463,7 @@ int main(int argc, char* argv[]) {
 	 * END OF COMPILE-TIME SECTION
 	 */
 
-	printf("size of long long int = %d (if not 8, you're in trouble)\n", sizeof(long long int));
+	printf("size of long long int = %d (if not 8, you're in trouble)\n", (int) sizeof(long long int));
 
 	printf("Testing M%d, using an irrational base with wordlengths (%d, %d),\n"
 		   "giving an FFT runlength of 2^%f = %d\n",
@@ -726,7 +704,7 @@ static __global__ void computeMaxBitVector(float *dev_errArr, long long *llint_s
 /**
 * errorTrial()
 */
-float errorTrial(int testIterations, int testPrime, int signalSize) {
+float errorTrial(unsigned int testIterations, unsigned int testPrime, unsigned int signalSize) {
 
 	// We assume throughout that signalSize is divisible by T_PER_B
 	const int numBlocks = signalSize/T_PER_B;
@@ -787,14 +765,14 @@ float errorTrial(int testIterations, int testPrime, int signalSize) {
 	cutilSafeCall(cudaMemcpy(bitsPerWord8, h_bitsPerWord8, bpw_size, cudaMemcpyHostToDevice));
 
 	if (opt_verbose) {
-		for (int i = 0; i < 20; i++) {
+		for (unsigned int i = 0; i < 20; i++) {
 			printf("word[%d] numbits = %d\n", i, h_bitsPerWord[i]);
 			printf("numbits of this and following 7 are: ");
 			for (int bit = 1; bit < 256; bit *= 2)
 				printf("%d ", bit & h_bitsPerWord8[i] ? h_HI_BITS : h_LO_BITS);
 			printf("\n");
 		}
-		for (int i = signalSize - 8; i < signalSize; i++) {
+		for (unsigned int i = signalSize - 8; i < signalSize; i++) {
 			printf("word[%d] numbits = %d\n", i, h_bitsPerWord[i]);
 			printf("numbits of this and following 7 are: ");
 			for (int bit = 1; bit < 256; bit *= 2)
@@ -965,7 +943,7 @@ float errorTrial(int testIterations, int testPrime, int signalSize) {
 void print_residue(int testPrime, int *h_signalOUT, int signalSize) {
 	static unsigned long int *hex = NULL;
 	static unsigned long int prior_hex = 0;
-	static char bits_fmt[16] = "\0"; /* "%%0%ulx" -> "%08lx" or "%016lx" depending on sizeof(UL) */
+
 	long long int k, j=0, i, word, k1;
 	double lo = floor((exp(floor((double)testPrime/signalSize)*log(2.0)))+0.5);
 	double hi = lo+lo;
@@ -1023,8 +1001,6 @@ void print_residue(int testPrime, int *h_signalOUT, int signalSize) {
 	} while(totalbits > 0);
 	
 	printf("0x");
-//	if (bits_fmt[0] != '%')
-//			sprintf(bits_fmt, "%%0%lu%s", (unsigned long)(8/4), "lx"); /* 4 bits per hex 'digit' */
 	
 	for (j = (i - 1)/8; j >= 0; j--) {
 			printf("%02lx", hex[j]);
@@ -1038,7 +1014,7 @@ void print_residue(int testPrime, int *h_signalOUT, int signalSize) {
 * mersenneTest() -- full test of 2^testPrime - 1, including max error term every 1/50th
 *   time through loop
 */
-void mersenneTest(int testPrime, int signalSize) {
+void mersenneTest(unsigned int testPrime, unsigned int signalSize) {
 
 	// We assume throughout that signalSize is divisible by T_PER_B
 	const int numBlocks = signalSize/T_PER_B;
@@ -1148,7 +1124,7 @@ void mersenneTest(int testPrime, int signalSize) {
 	cutilSafeCall(cudaMemcpy(h_signalOUT, i_signalOUT, i_sizeOUT, cudaMemcpyDeviceToHost));
 
 	bool nonZeros = false;
-	for (int i = 0; i < signalSize; i++) {
+	for (unsigned int i = 0; i < signalSize; i++) {
 		if (h_signalOUT[i] > 0) {
 			nonZeros = true;
 			break;
@@ -1158,7 +1134,7 @@ void mersenneTest(int testPrime, int signalSize) {
 		printf("\nM_%d tests as non-prime.\n", testPrime);
 
 		if (testPrime < 50000) {
-			for (int i = 0; i < signalSize; i++) {
+			for (unsigned int i = 0; i < signalSize; i++) {
 			//	unsigned char ch = h_signal[i] & 0xFF;
 
 				printf("%05x", h_signalOUT[i]);
