@@ -168,7 +168,7 @@
 #include "cuda_safecalls.h"
 
 // Create ThreadsPerBlock constant
-const int T_PER_B = 1024;
+const int T_PER_B = 512;
 
 // NOTE: testPrimes below 9689 generate runlengths < 1024, which breaks the code if T_PER_B = 1024
 
@@ -332,19 +332,37 @@ void (*sliceAndDice)(int *iArr, int *hiArr, long long int *lliArr, unsigned char
  * For n = 2 to 6. This uses templated kernel functions for the different lengths,
  *   as defined in IrrBaseBalanced.cu file.  (Thanks, Alex.)
  */
-void setSliceAndDice(int carryDigits) {
+void setSliceAndDice(int testPrime, int signalSize) {
 
-	switch (carryDigits) {
-		case 2: sliceAndDice = llintToIrrBal<2>;
-		break;
-		case 3: sliceAndDice = llintToIrrBal<3>;
-		break;
-		case 4: sliceAndDice = llintToIrrBal<4>;
-		break;
-		case 5: sliceAndDice = llintToIrrBal<5>;
-		break;
-		default: sliceAndDice = llintToIrrBal<6>;
-		break;
+	switch ((int)(testPrime / signalSize)) {
+		case 19:
+		case 18:
+			sliceAndDice = llintToIrrBal<2>;
+			break;
+		case 17:
+		case 16:
+		case 15:
+			sliceAndDice = llintToIrrBal<3>;
+			break;
+		case 14:
+		case 13:
+		case 12:
+			sliceAndDice = llintToIrrBal<4>;
+			break;
+		case 11:
+		case 10:
+		case 9:
+			sliceAndDice = llintToIrrBal<5>;
+			break;
+		case 8:
+		case 7:
+		case 6:
+			sliceAndDice = llintToIrrBal<6>;
+			break;
+		default:
+			fprintf(stderr, "testPrime / signalSize out of range: %d\n",
+					(int)(testPrime / signalSize));
+			exit(-1);
 	}
 }
 
@@ -364,11 +382,11 @@ void mersenneTest(unsigned int testPrime, unsigned int signalSize);
  */
 void print_help() {
 	fprintf(stderr, "%s (v%s):\n\n", program_name, program_version);
-	fprintf(stderr, "-d\tspecify CUDA device to use\n");
-	fprintf(stderr, "-v\tenable verbose output\n");
-	fprintf(stderr, "-q\tdisable verbose output\n");
-	fprintf(stderr, "-f\tspecify signalLength (FFT)\n");
-	fprintf(stderr, "-n\tspecify number to be tested\n");
+	fprintf(stderr, "\t-d\tspecify CUDA device to use\n");
+	fprintf(stderr, "\t-v\tenable verbose output\n");
+	fprintf(stderr, "\t-q\tdisable verbose output\n");
+	fprintf(stderr, "\t-f\tspecify signalLength (must be divisible by %d)\n", T_PER_B);
+	fprintf(stderr, "\t-n\tspecify number to be tested\n");
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -393,6 +411,10 @@ int main(int argc, char* argv[]) {
 				break;
 			case 'f':
 				signalSize = atoi(optarg);
+				if (signalSize%T_PER_B) {
+					fprintf(stderr, "Option -f: must be divisible by %d\n", T_PER_B);
+					return(-1);
+				}
 				break;
 			case 'n':
 				testPrime = atoi(optarg);
@@ -462,7 +484,7 @@ int main(int argc, char* argv[]) {
 	// Based on the problem size, and runlength, set the number of carry digits
 	//   and assign the global slice-and-dice function from the templated
 	//   llintToBalInt<n>() function
-	setSliceAndDice(2); // 2 is for the wd (18, 19) used by some typical examples
+	setSliceAndDice(testPrime, signalSize); // 2 is for the wd (18, 19) used by some typical examples
 	/**
 	 * END OF COMPILE-TIME SECTION
 	 */
@@ -712,6 +734,10 @@ float errorTrial(unsigned int testIterations, unsigned int testPrime, unsigned i
 
 	// We assume throughout that signalSize is divisible by T_PER_B
 	const int numBlocks = signalSize/T_PER_B;
+
+	// Run at least 50 testIterations
+	if (testIterations<50)
+		testIterations = 50;
 
 	// Allocate host memory to return signal as necessary
 	int *h_signalOUT = (int *) malloc(sizeof(int)*signalSize);
