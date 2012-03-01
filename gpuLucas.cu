@@ -837,16 +837,23 @@ float errorTrial(unsigned int testIterations, unsigned int testPrime, unsigned i
 
 			// ERROR TESTS
 			invDWTproductMinus2ERROR<<<numBlocks, T_PER_B>>>(llint_signal, d_signal, dev_Ainv, signalSize);
+			cutilCheckMsg("Kernel execution failed [ ivnDWTproductMinus2ERROR ]");
 			computeErrorVector<<<numBlocks, T_PER_B>>>(dev_errArr, d_signal, signalSize);
+			cutilCheckMsg("Kernel execution failed [ computeErrorVector ]");
 			float maxerr = findMaxErrorHOST(dev_errArr, host_errArr, signalSize);
 			if (maxerr >= 0.5f) {
 					printf("max abs error = %f, is too high. Exiting\n", maxerr);
 					totalTime = -1;
 					break;
+			} else if (maxerr == 0.0f) {
+				printf("max abs error = 0. This should never happen\n");
+				totalTime = -1;
+				break;
 			} else if (opt_verbose)
 					printf("\n[%d/50]: iteration %d: max abs error = %f", iter/(testPrime/50), iter, maxerr);
 
 			computeMaxBitVector<<<numBlocks, T_PER_B>>>(dev_errArr, llint_signal, signalSize);
+			cutilCheckMsg("Kernel execution failed [ computeMaxBitVector ]");
 			float maxBitVector = findMaxErrorHOST(dev_errArr, host_errArr, signalSize);
 			if (opt_verbose) {
 					printf("\n[%d/50]: iteration %d: max Bit Vector = %f", iter/(testPrime/50), iter, maxBitVector);
@@ -858,6 +865,7 @@ float errorTrial(unsigned int testIterations, unsigned int testPrime, unsigned i
 			cutilSafeCall(cudaEventCreate(&stop));
 			cutilSafeCall(cudaEventRecord(start, 0));
 			sliceAndDice<<<numBlocks, T_PER_B>>>(i_signalOUT, i_hiBitArr, llint_signal, bitsPerWord8, signalSize);
+			cutilCheckMsg("Kernel execution failed [ sliceAndDice ]");
 			cutilSafeCall(cudaEventRecord(stop, 0));
 			cutilSafeCall(cudaEventSynchronize(stop));
 			cutilSafeCall(cudaEventElapsedTime(&elapsedTime, start, stop));
@@ -882,10 +890,14 @@ float errorTrial(unsigned int testIterations, unsigned int testPrime, unsigned i
 			cutilCheckMsg("Kernel execution failed [ CUFFT_EXECINVERSE ]");
 
 			invDWTproductMinus2<<<numBlocks, T_PER_B>>>(llint_signal, d_signal, dev_Ainv, signalSize);
-						sliceAndDice<<<numBlocks, T_PER_B>>>(i_signalOUT, i_hiBitArr, llint_signal, bitsPerWord8, signalSize);
+			cutilCheckMsg("Kernel execution failed [ invDWTproductMinus2 ]");
+
+			sliceAndDice<<<numBlocks, T_PER_B>>>(i_signalOUT, i_hiBitArr, llint_signal, bitsPerWord8, signalSize);
+			cutilCheckMsg("Kernel execution failed [ sliceAndDice ]");
 		}
 
 		loadIntToDoubleIBDWT<<<numBlocks, T_PER_B>>>(d_signal, i_signalOUT, i_hiBitArr, dev_A, signalSize);
+		cutilCheckMsg("Kernel execution failed [ loadIntToDoubleIBDWT ]");
 	}
 	
 	// DONE!  Final copy out from GPU, since not done by default as for CPU stages
@@ -1103,24 +1115,34 @@ void mersenneTest(unsigned int testPrime, unsigned int signalSize) {
 		//    Every 1/50th of the way done, do some error testing
 		if (iter % (testPrime/50) == 0) {
 			invDWTproductMinus2ERROR<<<numBlocks, T_PER_B>>>(llint_signal, d_signal, dev_Ainv, signalSize);
+			cutilCheckMsg("Kernel execution failed [ invDWTproductMinus2ERROR ]");
 			computeErrorVector<<<numBlocks, T_PER_B>>>(dev_errArr, d_signal, signalSize);
+			cutilCheckMsg("Kernel execution failed [ computeErrorVector ]");
+
 			float maxerr = findMaxErrorHOST(dev_errArr, host_errArr, signalSize);
 			printf("\n[%d/50]: iteration %d: max abs error = %f", iter/(testPrime/50), iter, maxerr);
 			fflush(stdout);
-		}
-		else
+		} else {
 			invDWTproductMinus2<<<numBlocks, T_PER_B>>>(llint_signal, d_signal, dev_Ainv, signalSize);
+			cutilCheckMsg("Kernel execution failed [ invDWTproductMinus2 ]");
+		}
 
 		// REBALANCE llint TIMING
 		sliceAndDice<<<numBlocks, T_PER_B>>>(i_signalOUT, i_hiBitArr, llint_signal, bitsPerWord8, signalSize);
+		cutilCheckMsg("Kernel execution failed [ sliceAndDice ]");
 
 		loadIntToDoubleIBDWT<<<numBlocks, T_PER_B>>>(d_signal, i_signalOUT, i_hiBitArr, dev_A, signalSize);
+		cutilCheckMsg("Kernel execution failed [ loadIntToDoubleIBDWT ]");
 	}
 
 	// DONE!  Final copy out from GPU, since not done by default as for CPU stages
 	// DO GOOD REBALANCE HERE
 	addPseudoBalanced<<<numBlocks, T_PER_B>>>(i_signalOUT, i_hiBitArr, signalSize);
+	cutilCheckMsg("Kernel execution failed [ addPseudoBalancd ]");
+	
 	rebalanceIrrIntSEQGPU<<<1, 1>>>(i_signalOUT, bitsPerWord8, signalSize);
+	cutilCheckMsg("Kernel execution failed [ rebalanceIrrIntSEQGPU]");
+
 	cutilSafeCall(cudaMemcpy(h_signalOUT, i_signalOUT, i_sizeOUT, cudaMemcpyDeviceToHost));
 
 	bool nonZeros = false;
