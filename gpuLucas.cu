@@ -195,6 +195,11 @@ int opt_verbose = 0;
 char program_name[] = "gpuLucas";
 char program_version[] = "0.9.0";
 
+int resuming = 0;
+// checkpoint filename buffers
+char checkpoint_file[32];
+char checkpoint_backup[32];
+
 __constant__ int LO_BITS;
 __constant__ int HI_BITS;
 __constant__ int BASE_LO;
@@ -333,7 +338,10 @@ void setSliceAndDice(int testPrime, int signalSize) {
  */
 float errorTrial(unsigned int testIterations, unsigned int testPrime, unsigned int signalSize);
 unsigned int findSignalSize(unsigned int testPrime);
-void mersenneTest(unsigned int testPrime, unsigned int signalSize);
+void mersenneTest(unsigned int testPrime, unsigned int signalSize, Real *d_signal, unsigned int iter);
+
+void writeCheckpoint(Real *signal, unsigned int testPrime, unsigned int signalSize, unsigned int iter);
+Real *readCheckpoint(unsigned int testPrime, unsigned int *signalSize, unsigned int *resume_iter);
 
 /**
  * print_help()
@@ -351,7 +359,7 @@ void print_help() {
 // Program main
 ////////////////////////////////////////////////////////////////////////////////
 int main(int argc, char* argv[]) {
-	int signalSize = 0, testPrime = 0;
+	unsigned int signalSize = 0, testPrime = 0;
 	int c;
 	int use_device = 0;
 
@@ -412,6 +420,9 @@ int main(int argc, char* argv[]) {
 			abort();
 	}
 
+	sprintf(checkpoint_file, "%d" ".chk", testPrime);
+	sprintf(checkpoint_backup, "%d" ".chk.bak", testPrime);
+
 	int deviceCount = 0;
 	cudaError_t error_id = cudaGetDeviceCount(&deviceCount);
 
@@ -437,6 +448,10 @@ int main(int argc, char* argv[]) {
 	fprintf(stderr, "Using selected device %d: %s\n\n", use_device, deviceProp.name);
 	cudaSetDevice(use_device);
 
+	unsigned int resume_iter;
+	Real *resume_signal;
+	if ((resume_signal = readCheckpoint(testPrime, &signalSize, &resume_iter)) != NULL)
+		resuming = 1;
 
 	if (signalSize == 0)  {
 		signalSize = findSignalSize(testPrime);
@@ -450,10 +465,8 @@ int main(int argc, char* argv[]) {
 	// Based on the problem size, and runlength, set the number of carry digits
 	//   and assign the global slice-and-dice function from the templated
 	//   llintToBalInt<n>() function
-	setSliceAndDice(testPrime, signalSize); // 2 is for the wd (18, 19) used by some typical examples
-	/**
-	 * END OF COMPILE-TIME SECTION
-	 */
+	setSliceAndDice(testPrime, signalSize);
+
 
 	if ((int)sizeof(long long int) != 8) {
 		printf("size of long long int = %d (if not 8, you're in trouble)\n", (int) sizeof(long long int));
@@ -480,6 +493,8 @@ int main(int argc, char* argv[]) {
 	int trialFraction = 10000;
 	// Make sure we run at least a couple iterations through errorTrial in case testPrime is too small
 	trialFraction = testPrime/100 < trialFraction ? testPrime/100 : trialFraction;
+	if (!opt_quiet)
+		printf("\nRunning error trial test before beginning full test...\n");
 	float elapsedMsecDEV = errorTrial(testPrime/trialFraction, testPrime, signalSize);
 
 	// stop the timer
@@ -497,7 +512,8 @@ int main(int argc, char* argv[]) {
 			printf ("Encountered an error in the errorTrial test. Aborting\n");
 			cutilDeviceReset();
 			exit(EXIT_FAILURE);
-	}
+	} else
+		printf("Error trial completed successfully.\n");
 
 	if (!opt_quiet) {
 		printf("\nTiming:  To test M%d"
@@ -508,17 +524,31 @@ int main(int argc, char* argv[]) {
 				elapsedMsec, elapsedMsec/1000,
 				elapsedMsecDEV*trialFraction, elapsedMsecDEV*trialFraction/1000,
 				elapsedMsecDEV*testPrime, elapsedMsecDEV*testPrime/1000);
-		
+
 		printf("\nBeginning full test of M%d\n\n", testPrime);
 	} else
 		printf("\n  est. total time:\t%10.f msec = %.1f sec\n\n",
 				elapsedMsecDEV*testPrime, elapsedMsecDEV*testPrime/1000);
-	
+
+	if (resuming)
+		printf("\nResuming full test of M%d at iteration %d (%2.1f%%)\n\n", testPrime, resume_iter, 100.0f * (float)resume_iter / (float)testPrime);
 	cutilSafeCall(cudaEventCreate(&mersenneTest_start));
 	cutilSafeCall(cudaEventCreate(&mersenneTest_stop));
 	cutilSafeCall(cudaEventRecord(mersenneTest_start, 0));
 
-	mersenneTest(testPrime, signalSize);
+
+	// Define this outside the test so we have somewhere to copy resume data to, and free up host memory
+	Real *d_signal;
+	cutilSafeCall(cudaMalloc((void**)&d_signal, sizeof(Real) * signalSize));
+
+	if (resuming) {
+		cutilSafeCall(cudaMemcpy(d_signal, resume_signal, sizeof(Real) * signalSize, cudaMemcpyHostToDevice));
+		free(resume_signal);
+	}
+
+	mersenneTest(testPrime, signalSize, d_signal, resume_iter);
+
+	cutilSafeCall(cudaFree(d_signal));
 
 	//get the the total elapsed time in ms
 	cutilSafeCall(cudaEventRecord(mersenneTest_stop, 0));
@@ -528,6 +558,10 @@ int main(int argc, char* argv[]) {
 	
 	cutilSafeCall(cudaEventDestroy(mersenneTest_start));
 	cutilSafeCall(cudaEventDestroy(mersenneTest_stop));
+
+	// Remove checkpoint files	
+	(void) unlink (checkpoint_file);
+	(void) unlink (checkpoint_backup);
 
 	printf("\nTotal elapsed time:\t%10.f msec = %.1f sec\n",
 		   elapsedMsec, elapsedMsec/1000);
@@ -1214,15 +1248,17 @@ void print_residue(int testPrime, int *h_signalOUT, int signalSize) {
 * mersenneTest() -- full test of 2^testPrime - 1, including max error term every 1/50th
 *   time through loop
 */
-void mersenneTest(unsigned int testPrime, unsigned int signalSize) {
+void mersenneTest(unsigned int testPrime, unsigned int signalSize, Real *d_signal, unsigned int iter) {
 
 	// We assume throughout that signalSize is divisible by T_PER_B
 	const int numBlocks = signalSize/T_PER_B;
 	const int numFFTblocks = (signalSize/2 + 1)/T_PER_B + 1;
-
+	
 	// Allocate host memory to return signal as necessary
 	int *h_signalOUT = (int *) malloc(sizeof(int)*signalSize);
- 
+	// For Checkpointing
+	Real *cp_signalOUT = (Real *) malloc(sizeof(Real)*signalSize);
+
 	// Store computed bit values and bases for precomputation of 
 	//    masks for the 
 	int *h_bases = (int *) malloc(sizeof(int)*signalSize);
@@ -1231,7 +1267,7 @@ void mersenneTest(unsigned int testPrime, unsigned int signalSize) {
 
 	// Allocate device memory for signal
 	int *i_signalOUT;
-	Real *d_signal;
+//	Real *d_signal;
 	Complex *z_signal;
 	int i_sizeOUT = sizeof(int)*signalSize;
 	int d_size = sizeof(Real)*signalSize;
@@ -1244,7 +1280,7 @@ void mersenneTest(unsigned int testPrime, unsigned int signalSize) {
 	unsigned char *bitsPerWord8;
 	long long int *llint_signal;
 	cutilSafeCall(cudaMalloc((void**)&i_signalOUT, i_sizeOUT));
-	cutilSafeCall(cudaMalloc((void**)&d_signal, d_size));
+//	cutilSafeCall(cudaMalloc((void**)&d_signal, d_size));
 	cutilSafeCall(cudaMalloc((void**)&z_signal, z_size));
 
 	cutilSafeCall(cudaMalloc((void**)&dev_A, d_size));
@@ -1280,13 +1316,17 @@ void mersenneTest(unsigned int testPrime, unsigned int signalSize) {
 	cutilSafeCall(cudaMemcpy(dev_A, h_A, sizeof(double)*signalSize, cudaMemcpyHostToDevice));
 	cutilSafeCall(cudaMemcpy(dev_Ainv, h_Ainv, sizeof(double)*signalSize, cudaMemcpyHostToDevice));
 
-	// load the int array to the doubles for FFT
-	// This is already balanced, and already multiplied by a_0 = 1 for DWT
-	loadValue4ToFFTarray<<<numBlocks, T_PER_B>>>(d_signal, signalSize);
-	cutilCheckMsg("Kernel execution failed [ loadValue4ToFFTarray ]");
+	if (!resuming) {
+		iter = 2;
+		
+		// load the int array to the doubles for FFT
+		// This is already balanced, and already multiplied by a_0 = 1 for DWT
+		loadValue4ToFFTarray<<<numBlocks, T_PER_B>>>(d_signal, signalSize);
+		cutilCheckMsg("Kernel execution failed [ loadValue4ToFFTarray ]");
+	}
 
 	// Loop M-2 times
-	for (unsigned int iter = 2; iter < testPrime; iter++) {
+	for (; iter < testPrime; iter++) {
 
 		// Transform signal
 		cufftSafeCall(CUFFT_EXECFORWARD(plan1, (Real *)d_signal, (Complex *)z_signal));
@@ -1322,6 +1362,13 @@ void mersenneTest(unsigned int testPrime, unsigned int signalSize) {
 
 		loadIntToDoubleIBDWT<<<numBlocks, T_PER_B>>>(d_signal, i_signalOUT, i_hiBitArr, dev_A, signalSize);
 		cutilCheckMsg("Kernel execution failed [ loadIntToDoubleIBDWT ]");
+
+		// checkpoint every 10000 iterations
+		if (iter % 1000 == 0) {
+			cutilDeviceSynchronize();
+			cutilSafeCall(cudaMemcpy(cp_signalOUT, d_signal, sizeof(Real) * signalSize, cudaMemcpyDeviceToHost));
+			writeCheckpoint(cp_signalOUT, testPrime, signalSize, iter + 1);
+		}
 	}
 
 	// DONE!  Final copy out from GPU, since not done by default as for CPU stages
@@ -1367,6 +1414,7 @@ void mersenneTest(unsigned int testPrime, unsigned int signalSize) {
 
 	// cleanup memory
 	free(h_signalOUT);
+	free(cp_signalOUT);
 	free(h_bases);
 	free(h_bitsPerWord);
 	free(h_bitsPerWord8);
@@ -1375,7 +1423,7 @@ void mersenneTest(unsigned int testPrime, unsigned int signalSize) {
 	free(host_errArr);
 
 	cutilSafeCall(cudaFree(i_signalOUT));
-	cutilSafeCall(cudaFree(d_signal));
+//	cutilSafeCall(cudaFree(d_signal));
 	cutilSafeCall(cudaFree(z_signal));
 
 	cutilSafeCall(cudaFree(i_hiBitArr));
@@ -1385,4 +1433,102 @@ void mersenneTest(unsigned int testPrime, unsigned int signalSize) {
 	cutilSafeCall(cudaFree(llint_signal));
 
 	cutilSafeCall(cudaFree(dev_errArr));
+}
+
+Real *readCheckpoint(unsigned int testPrime, unsigned int *signalSize, unsigned int *resume_iter) {
+	FILE *fPtr;
+	unsigned int testPrime_r, signalSize_r, resumeiter_r; 
+	Real *signal;
+
+	char program_name_r[16];
+	char program_vers_r[16];
+
+	if (opt_verbose)
+		fprintf(stderr, "Attempting to resume from checkpoint file: %s ...", checkpoint_file);
+	fPtr = fopen (checkpoint_file, "rb");
+	if (!fPtr) {
+		if (opt_verbose)
+			fprintf(stderr, "failed.\nAttempting to resume from backup checkpoint file: %s ...", checkpoint_backup);
+		// First checkpoint failed. Try backup
+		fPtr = fopen (checkpoint_backup, "rb");
+		if (!fPtr) {
+			// Both failed, give up
+			if (opt_verbose)
+				fprintf(stderr, "failed.\n\nUnable to load a checkpoint file, starting from the beginning\n");
+			return NULL;
+		}
+	}
+	
+	if (opt_verbose)
+		fprintf(stderr,"good!.\n");
+
+	if (fread(&program_name_r, 1, sizeof(program_name_r), fPtr) != sizeof(program_name_r) ||
+		fread(&program_vers_r, 1, sizeof(program_vers_r), fPtr) != sizeof(program_vers_r)) {
+		fclose (fPtr);
+		return NULL;
+	}
+
+	if  (strcmp(program_name_r, program_name) != 0) {
+		fprintf(stderr, "Checkpoint was created with a different application, not using checkpoint\n\n");
+		return NULL;
+	}
+
+	if (strcmp(program_vers_r, program_version) != 0) {
+		fprintf(stderr, "Checkpoint was created with a different version of %s, attempting to continue\n\n", program_name);
+	}
+
+	// check parameters
+	if (fread (&testPrime_r,  1, sizeof (testPrime_r),  fPtr) != sizeof (testPrime_r)  ||
+		fread (&signalSize_r, 1, sizeof (signalSize_r), fPtr) != sizeof (signalSize_r) ||
+		fread (&resumeiter_r, 1, sizeof (resumeiter_r), fPtr) != sizeof (resumeiter_r)) {
+			fprintf (stderr, "\nThe checkpoint doesn't match current test.  Current test will be restarted\n");
+			fclose (fPtr);
+			return NULL;
+	}
+	
+	if (testPrime != testPrime_r) { 
+		fprintf (stderr, "\nThe checkpoint doesn't match current test.  Current test will be restarted\n");
+		fclose (fPtr);
+		return NULL;
+	}
+	
+	// check for successful read of z, delayed until here since zSize can vary
+	signal = (Real *) malloc (sizeof (Real) * (signalSize_r));
+	if (fread (signal, 1, sizeof (Real) * (signalSize_r), fPtr) != (sizeof (Real) * (signalSize_r))) {
+		fprintf (stderr, "\nThe checkpoint doesn't match current test.  Current test will be restarted\n");
+		fclose (fPtr);
+		free (signal);
+		return NULL;
+	}
+
+	// We have a good checkpoint. Return it
+	*resume_iter = resumeiter_r;
+	*signalSize = signalSize_r;
+	return signal;
+}
+
+void writeCheckpoint (Real *signal, unsigned int testPrime, unsigned int signalSize, unsigned int iter) {
+//	return;
+	FILE *fPtr;
+
+	(void) unlink (checkpoint_backup);
+	(void) rename (checkpoint_file, checkpoint_backup);
+	
+	fPtr = fopen (checkpoint_file, "wb");
+	if (!fPtr)
+		return;
+
+	char buf[16];
+
+	memset(buf, 0, sizeof(buf));
+	sprintf(buf, "%s", program_name);
+	fwrite (&buf            , 1, sizeof (buf)              , fPtr);
+	memset(buf, 0, sizeof(buf));
+	sprintf(buf, "%s", program_version);
+	fwrite (&buf            , 1, sizeof (buf)              , fPtr);
+	fwrite (&testPrime      , 1, sizeof (testPrime)        , fPtr);
+	fwrite (&signalSize     , 1, sizeof (signalSize)       , fPtr);
+	fwrite (&iter           , 1, sizeof (iter)             , fPtr);
+	fwrite (signal          , 1, sizeof (Real) * signalSize, fPtr);
+	fclose (fPtr);
 }
