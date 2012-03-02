@@ -193,7 +193,7 @@ int h_HI_MODMASK;
 int opt_quiet = 0;
 int opt_verbose = 0;
 char program_name[] = "gpuLucas";
-char program_version[] = "version";
+char program_version[] = "0.9.0";
 
 __constant__ int LO_BITS;
 __constant__ int HI_BITS;
