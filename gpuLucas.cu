@@ -167,52 +167,19 @@
 #include <cufft.h>
 #include "cuda_safecalls.h"
 
+// NOTE: testPrimes below 9689 generate runlengths < 1024, which breaks the code if T_PER_B = 1024
 // Create ThreadsPerBlock constant
 const int T_PER_B = 512;
 
-// NOTE: testPrimes below 9689 generate runlengths < 1024, which breaks the code if T_PER_B = 1024
+// These determine the highest FFT signalSize we will check in findSignalSize()
+// where signalSize == 2^MAX_2 * 3^MAX_3 * 5^MAX_5 * 7^MAX_7
+#define MAX_2 24 // 16777216
+#define MAX_3 15 // 14348907
+#define MAX_5 10 // 9765625
+#define MAX_7 8  // 5764801
 
-/**
- * Currently need to set testPrime and signalSize in main()
- * These were some example values.
- */
-//const int TESTPRIME = M_859433; const int SIGNAL_SIZE = 49152;
-//const int TESTPRIME = M_1257787; const int SIGNAL_SIZE = 65536;
-//const int TESTPRIME = M_3021377; const int SIGNAL_SIZE = 163840;
-//const int TESTPRIME = M_42643801; const int SIGNAL_SIZE = 2359296;
-//const int TESTPRIME = M_43112609; const int SIGNAL_SIZE = 2359296;
-
-/**
- * The following were scratch-computations to look for good signal-lengths
- *   Need collated lists of time/signal-length/fft trade-offs.
- *   Have earlier CUFFT timings, but need to automate GPU profiling,
- *     and select appropriate lengths at runtime.
- */
-
-/**
- * Using a base 65536 as a starting point, 2^16, giving W = 16 bits
- * with a traditional FFT length = ceil(log2(2*TESTPRIME/log2(2^16))
- *                               = ceil(log2(TESTPRIME/8))
- *                               = ceil(log2(TESTPRIME)) - 3
- *
- * Generally the case that the ibdwt method reduces this by factor of 2,
- *   since don't need to pad prime out to twice nearest power of two
- */
-//const int LOG_RUNLENGTH = (int) ceil(log2(1.0*TESTPRIME)) - 4;
-//const int SIGNAL_SIZE = (1 << LOG_RUNLENGTH);
-//const int SIGNAL_SIZE = 8388608;
-//   --- 2**16*5*7
-//const int SIGNAL_SIZE = (1 << 23);
-//const int SIGNAL_SIZE = 2359296;  // 2**18 * 3**2     ; time 2.947
-//const int SIGNAL_SIZE = 2322432;  // 2**12 * 3**4 * 7 ; time 3.004
-//const int SIGNAL_SIZE = 2239488;  // 2**10 * 3**7     ; time 2.961
-
-//const int SIGNAL_SIZE = (1 << 24);// + (1 << 22);// - (1 << 18);// + (1 << 18);// - (1 << 17);// 
-
-//const int SIGNAL_SIZE = 1 << (LOG_RUNLENGTH - 1); //  good for M1257787
-
-//const int SIGNAL_SIZE = (1 << (LOG_RUNLENGTH - 1)) + (1 << (LOG_RUNLENGTH - 3)); //  good for M3021377
-//const int SIGNAL_SIZE = (1 << (LOG_RUNLENGTH - 1)) + (1 << (LOG_RUNLENGTH - 4)); // good for M43112609, M42643801
+// This determines the maximum allowable roundoff error
+#define ERROR_LIMIT 0.40f
 
 // At runtime, set constant and load to GPU for use in IrrBaseBalanced.cu code
 int h_LO_BITS;
@@ -331,39 +298,29 @@ void (*sliceAndDice)(int *iArr, int *hiArr, long long int *lliArr, unsigned char
 /**
  * For n = 2 to 6. This uses templated kernel functions for the different lengths,
  *   as defined in IrrBaseBalanced.cu file.  (Thanks, Alex.)
+ *   These seem to be good divisions for the sliceAndDice but might need to be adjusted.
+ * Auto-selected signalSize will almost always choose cases 17 through 19.
  */
 void setSliceAndDice(int testPrime, int signalSize) {
 
-	switch ((int)(testPrime / signalSize)) {
-		case 19:
-		case 18:
-			sliceAndDice = llintToIrrBal<2>;
-			break;
-		case 17:
-		case 16:
-		case 15:
-			sliceAndDice = llintToIrrBal<3>;
-			break;
-		case 14:
-		case 13:
-		case 12:
-			sliceAndDice = llintToIrrBal<4>;
-			break;
-		case 11:
-		case 10:
-		case 9:
-			sliceAndDice = llintToIrrBal<5>;
-			break;
-		case 8:
-		case 7:
-		case 6:
-			sliceAndDice = llintToIrrBal<6>;
-			break;
-		default:
-			fprintf(stderr, "testPrime / signalSize out of range: %d\n",
-					(int)(testPrime / signalSize));
-			exit(-1);
+	int ratio = testPrime / signalSize;
+
+	if (ratio >= 21) {
+		fprintf(stderr, "testPrime / signalSize out of range: %d\n",
+				(int)(testPrime / signalSize));
+		exit(-1);
 	}
+
+	if (ratio >= 18)
+		sliceAndDice = llintToIrrBal<2>;
+	else if (ratio >= 15)
+		sliceAndDice = llintToIrrBal<3>;
+	else if (ratio >= 12)
+		sliceAndDice = llintToIrrBal<4>;
+	else if (ratio >= 9)
+		sliceAndDice = llintToIrrBal<5>;
+	else
+		sliceAndDice = llintToIrrBal<6>;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -375,6 +332,7 @@ void setSliceAndDice(int testPrime, int signalSize) {
  *    of convolution-multiply and rebalancing functions
  */
 float errorTrial(unsigned int testIterations, unsigned int testPrime, unsigned int signalSize);
+unsigned int findSignalSize(unsigned int testPrime);
 void mersenneTest(unsigned int testPrime, unsigned int signalSize);
 
 /**
@@ -396,6 +354,8 @@ int main(int argc, char* argv[]) {
 	int signalSize = 0, testPrime = 0;
 	int c;
 	int use_device = 0;
+
+	// getopt: parse command line options
 	while (( c = getopt(argc, argv, "hvqf:n:d:")) != -1) {
 		switch (c) {
 			case 'h':
@@ -446,9 +406,9 @@ int main(int argc, char* argv[]) {
 				return(-1);
 		}
 	}
-	if ( testPrime == 0 || signalSize == 0) {
+	if ( testPrime == 0) {
 			print_help();
-			fprintf(stderr, "testPrime or signalSize not specified, aborting\n");
+			fprintf(stderr, "testPrime not specified, aborting\n");
 			abort();
 	}
 
@@ -474,9 +434,15 @@ int main(int argc, char* argv[]) {
 
 	// Chosen device = use_device
 	cudaGetDeviceProperties(&deviceProp, use_device);
-	fprintf(stderr, "Using selected device %d: %s\n", use_device, deviceProp.name);
+	fprintf(stderr, "Using selected device %d: %s\n\n", use_device, deviceProp.name);
 	cudaSetDevice(use_device);
 
+
+	if (signalSize == 0)  {
+		signalSize = findSignalSize(testPrime);
+		printf("\nOptimal signalSize detected: %d\n\n", signalSize);
+	} else
+		printf("Using specified FFT runlength %d\n", signalSize);
 
 	// BEGIN by initializing constant memory on device
 	initConstantSymbols(testPrime, signalSize);
@@ -489,12 +455,16 @@ int main(int argc, char* argv[]) {
 	 * END OF COMPILE-TIME SECTION
 	 */
 
-	printf("size of long long int = %d (if not 8, you're in trouble)\n", (int) sizeof(long long int));
+	if ((int)sizeof(long long int) != 8) {
+		printf("size of long long int = %d (if not 8, you're in trouble)\n", (int) sizeof(long long int));
+		exit(-1);
+	}
 
 	printf("Testing M%d, using an irrational base with wordlengths (%d, %d),\n"
-		   "giving an FFT runlength of 2^%f = %d\n",
+		   "\tgiving an FFT runlength of 2^%f = %d\n",
 		   testPrime, h_LO_BITS, h_HI_BITS, log(1.0*signalSize)/log(2.0), signalSize);
-	printf("  NUM_BLOCKS = %d, T_PER_B = %d\n", signalSize/T_PER_B, T_PER_B);
+	if (!opt_quiet)
+		printf("\n\tNUM_BLOCKS = %d, T_PER_B = %d\n", signalSize/T_PER_B, T_PER_B);
 
 	// START timer now
 	cudaEvent_t errorTrial_start, errorTrial_stop, mersenneTest_start, mersenneTest_stop;
@@ -508,6 +478,8 @@ int main(int argc, char* argv[]) {
 	// return value is average time per Lucas-Lehmer iteration based on
 	//   GPU timings
 	int trialFraction = 10000;
+	// Make sure we run at least a couple iterations through errorTrial in case testPrime is too small
+	trialFraction = testPrime/100 < trialFraction ? testPrime/100 : trialFraction;
 	float elapsedMsecDEV = errorTrial(testPrime/trialFraction, testPrime, signalSize);
 
 	// stop the timer
@@ -527,16 +499,20 @@ int main(int argc, char* argv[]) {
 			exit(EXIT_FAILURE);
 	}
 
-	printf("\nTiming:  To test M%d"
-		   "\n  elapsed time :      %10.f msec = %.1f sec"
-		   "\n  dev. elapsed time:  %10.f msec = %.1f sec"
-		   "\n  est. total time:    %10.f msec = %.1f sec\n",
-		   testPrime,
-		   elapsedMsec, elapsedMsec/1000,
-		   elapsedMsecDEV*trialFraction, elapsedMsecDEV*trialFraction/1000,
-		   elapsedMsecDEV*testPrime, elapsedMsecDEV*testPrime/1000);
-
-	printf("\nBeginning full test of M%d\n", testPrime);
+	if (!opt_quiet) {
+		printf("\nTiming:  To test M%d"
+				"\n  elapsed time :      %10.f msec = %.1f sec"
+				"\n  dev. elapsed time:  %10.f msec = %.1f sec"
+				"\n  est. total time:    %10.f msec = %.1f sec\n",
+				testPrime,
+				elapsedMsec, elapsedMsec/1000,
+				elapsedMsecDEV*trialFraction, elapsedMsecDEV*trialFraction/1000,
+				elapsedMsecDEV*testPrime, elapsedMsecDEV*testPrime/1000);
+		
+		printf("\nBeginning full test of M%d\n\n", testPrime);
+	} else
+		printf("\n  est. total time:\t%10.f msec = %.1f sec\n\n",
+				elapsedMsecDEV*testPrime, elapsedMsecDEV*testPrime/1000);
 	
 	cutilSafeCall(cudaEventCreate(&mersenneTest_start));
 	cutilSafeCall(cudaEventCreate(&mersenneTest_stop));
@@ -553,9 +529,8 @@ int main(int argc, char* argv[]) {
 	cutilSafeCall(cudaEventDestroy(mersenneTest_start));
 	cutilSafeCall(cudaEventDestroy(mersenneTest_stop));
 
-	printf("\nTimings:  To test M%d"
-		   "\n  elapsed time :      %10.f msec = %.1f sec\n",
-		   testPrime, elapsedMsec, elapsedMsec/1000);
+	printf("\nTotal elapsed time:\t%10.f msec = %.1f sec\n",
+		   elapsedMsec, elapsedMsec/1000);
 
 	cutilDeviceReset();
 	exit(EXIT_SUCCESS);
@@ -728,6 +703,192 @@ static __global__ void computeMaxBitVector(float *dev_errArr, long long *llint_s
 }
 
 /**
+ * findSignalSize()
+ * Determines the best signalSize to use for a given testPrime
+ * Choice based on runtime and error
+ */
+unsigned int findSignalSize(unsigned int testPrime) {
+	int optimal_length = 0;
+	float bestTime = 99999;
+	long long unsigned int signalSize; // need to be bigger than necessary so some of the FFTlen combinations don't overflow
+	// Only use lengths that are between 1/15th and 1/20th the testPrime
+	int max_nx = testPrime / 17;
+	int min_nx = testPrime / 20;
+restart_findSignalSize:
+	if (!opt_quiet)
+		printf("Testing FFT lengths between %d and %d\n\n", min_nx, max_nx);
+
+	cudaEvent_t start_findSignalSize, stop_findSignalSize;
+	cutilSafeCall(cudaEventCreate(&start_findSignalSize));
+	cutilSafeCall(cudaEventCreate(&stop_findSignalSize));
+	float elapsedTime, maxerr;
+
+	// Need to run enough iterations to build-up the error, if there is any
+	// This seems to be around 40-45 iterations in practice.
+	int testIterations = 50;
+
+	for (int two = 0; two <= MAX_2; two++) {
+		for (int three = 0; three <= MAX_3; three++) {
+			for (int five = 0; five <= MAX_5; five++) {
+				for (int seven = 0; seven <= MAX_7; seven++) {
+					signalSize = (powl(2,two) * powl(3,three) * powl(5,five) * powl(7,seven));
+					if ((signalSize < (unsigned int)max_nx) & (signalSize > (unsigned int)min_nx) & (signalSize % T_PER_B == 0)) {
+						maxerr = 0;
+						int numBlocks = signalSize/T_PER_B;
+						setSliceAndDice(testPrime, signalSize);
+						initConstantSymbols(testPrime, signalSize);
+ 
+ 						// Store computed bit values and bases for precomputation of masks for the 
+						int *h_bitsPerWord = (int *) malloc(sizeof(int)*signalSize);
+						unsigned char *h_bitsPerWord8 = (unsigned char *) malloc(sizeof(unsigned char)*signalSize);
+						
+						// Allocate device memory for signal
+						int *i_signalOUT;
+						Real *d_signal;
+						Complex *z_signal;
+						int i_sizeOUT = sizeof(int)*signalSize;
+						int d_size = sizeof(Real)*signalSize;
+						int z_size = sizeof(Complex)*(signalSize/2 + 1);
+						int bpw_size = sizeof(unsigned char)*signalSize;
+						int llintSignalSize = sizeof(long long int)*signalSize;
+						Real *dev_A, *dev_Ainv;
+						unsigned char *bitsPerWord8;
+						long long int *llint_signal;
+						cutilSafeCall(cudaMalloc((void**)&i_signalOUT, i_sizeOUT));
+						cutilSafeCall(cudaMalloc((void**)&d_signal, d_size));
+						cutilSafeCall(cudaMalloc((void**)&z_signal, z_size));
+						cutilSafeCall(cudaMalloc((void**)&dev_A, d_size));
+						cutilSafeCall(cudaMalloc((void**)&dev_Ainv, d_size));
+						cutilSafeCall(cudaMalloc((void**)&bitsPerWord8, bpw_size));
+						cutilSafeCall(cudaMalloc((void**)&llint_signal, llintSignalSize));
+						
+						cufftHandle plan1, plan2;
+						cufftSafeCall(cufftPlan1d(&plan1, signalSize, CUFFT_TYPEFORWARD, 1));
+						cufftSafeCall(cufftPlan1d(&plan2, signalSize, CUFFT_TYPEINVERSE, 1));
+						
+						// Variables for the GPK carry-adder
+						// Array for high-bit carry out
+						int *i_hiBitArr;
+						cutilSafeCall(cudaMalloc((void**)&i_hiBitArr, sizeof(int)*signalSize));
+						
+						//make host and device arrays for error computation
+						float *dev_errArr;
+						cudaMalloc((void**) &dev_errArr, signalSize*sizeof(float));
+						float *host_errArr = (float *) malloc(signalSize*sizeof(float));
+						
+						// Compute word-sizes to use when dicing products to sum to int array
+						computeBitsPerWord(testPrime, h_bitsPerWord, signalSize);
+						computeBitsPerWordVectors(h_bitsPerWord8, h_bitsPerWord, signalSize);
+						cutilSafeCall(cudaMemcpy(bitsPerWord8, h_bitsPerWord8, bpw_size, cudaMemcpyHostToDevice));
+
+						double *h_A = (double *) malloc(signalSize*sizeof(double));
+						double *h_Ainv = (double *) malloc(signalSize*sizeof(double));
+						
+						// compute weights in extended precision, essential for non-power-of-two signal_size
+						computeWeightVectors(h_A, h_Ainv, testPrime, signalSize);
+						cutilSafeCall(cudaMemcpy(dev_A, h_A, sizeof(double)*signalSize, cudaMemcpyHostToDevice));
+						cutilSafeCall(cudaMemcpy(dev_Ainv, h_Ainv, sizeof(double)*signalSize, cudaMemcpyHostToDevice));
+						
+						// load the int array to the doubles for FFT
+						// This is already balanced, and already multiplied by a_0 = 1 for DWT
+						loadValue4ToFFTarray<<<numBlocks, T_PER_B>>>(d_signal, signalSize);
+						cutilCheckMsg("Kernel execution failed [ loadValue4ToFFTarray ]");
+						
+						int numFFTblocks = (signalSize/2 + 1)/T_PER_B + 1;
+						
+						// start timer
+						cutilSafeCall(cudaEventRecord(start_findSignalSize, 0));
+						for (int iter = 2; iter < testIterations; iter++) {
+							// Transform signal
+							cufftSafeCall(CUFFT_EXECFORWARD(plan1, (Real *)d_signal, (Complex *)z_signal));
+							cutilCheckMsg("Kernel execution failed [ CUFFT_EXECFORWARD ]");
+
+							// Multiply the coefficients componentwise
+							ComplexPointwiseSqr<<<numFFTblocks, T_PER_B>>>(z_signal, signalSize/2 + 1);
+							cutilCheckMsg("Kernel execution failed [ ComplexPointwiseSqr ]");
+							
+							// Transform signal back
+							cufftSafeCall(CUFFT_EXECINVERSE(plan2, (Complex *)z_signal, (Real *)d_signal));
+							cutilCheckMsg("Kernel execution failed [ CUFFT_EXECINVERSE ]");
+
+							// Calculate error
+							invDWTproductMinus2ERROR<<<numBlocks, T_PER_B>>>(llint_signal, d_signal, dev_Ainv, signalSize);
+							cutilCheckMsg("Kernel execution failed [ ivnDWTproductMinus2ERROR ]");
+							computeErrorVector<<<numBlocks, T_PER_B>>>(dev_errArr, d_signal, signalSize);
+							cutilCheckMsg("Kernel execution failed [ computeErrorVector ]");
+							
+							float this_err = findMaxErrorHOST(dev_errArr, host_errArr, signalSize);
+							maxerr = max(this_err, maxerr);
+							
+							sliceAndDice<<<numBlocks, T_PER_B>>>(i_signalOUT, i_hiBitArr, llint_signal, bitsPerWord8, signalSize);
+							cutilCheckMsg("Kernel execution failed [ sliceAndDice ]");
+							
+							loadIntToDoubleIBDWT<<<numBlocks, T_PER_B>>>(d_signal, i_signalOUT, i_hiBitArr, dev_A, signalSize);
+							cutilCheckMsg("Kernel execution failed [ loadIntToDoubleIBDWT ]");
+						}
+
+						cutilSafeCall(cudaEventRecord(stop_findSignalSize, 0));
+						cutilSafeCall(cudaEventSynchronize(stop_findSignalSize));
+						cutilSafeCall(cudaEventElapsedTime(&elapsedTime, start_findSignalSize, stop_findSignalSize));
+						
+						//Destroy CUFFT context
+						cufftSafeCall(cufftDestroy(plan1));
+						cufftSafeCall(cufftDestroy(plan2));
+						
+						// cleanup memory
+						free(h_bitsPerWord);
+						free(h_bitsPerWord8);
+						free(h_A);
+						free(h_Ainv);
+						free(host_errArr);
+						
+						cutilSafeCall(cudaFree(i_signalOUT));
+						cutilSafeCall(cudaFree(d_signal));
+						cutilSafeCall(cudaFree(z_signal));
+						cutilSafeCall(cudaFree(i_hiBitArr));
+						cutilSafeCall(cudaFree(dev_A));
+						cutilSafeCall(cudaFree(dev_Ainv));
+						cutilSafeCall(cudaFree(bitsPerWord8));
+						cutilSafeCall(cudaFree(llint_signal));
+						cutilSafeCall(cudaFree(dev_errArr));
+
+						if (!opt_quiet)
+							printf("Testing signalSize %d, time: %3.2fms, error: %1.8f", (int)signalSize, elapsedTime/testIterations, maxerr);
+
+						if (maxerr < ERROR_LIMIT) {
+							if (elapsedTime < bestTime) {
+								// we have a new best signalSize
+								optimal_length = signalSize;
+								bestTime = elapsedTime;
+							}
+						} else if (!opt_quiet) 
+								printf(" (skipping: error too high)");
+						if (!opt_quiet) {
+							printf("\n");
+							fflush(stdout);
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// If we haven't found a usable length, increase the search range slightly.
+	// Should only happen on smaller testPrimes, so won't increase run-time on larger testPrimes
+	if (optimal_length == 0) {
+		printf("Could not find a signalSize; Increasing search range\n");
+		max_nx = max_nx + 512;
+		min_nx = max(max(min_nx - 512, 0), testPrime/21);
+		goto restart_findSignalSize;
+	}
+		
+	cutilSafeCall(cudaEventDestroy(start_findSignalSize));
+	cutilSafeCall(cudaEventDestroy(stop_findSignalSize));
+	
+	return optimal_length;
+}
+
+/**
 * errorTrial()
 */
 float errorTrial(unsigned int testIterations, unsigned int testPrime, unsigned int signalSize) {
@@ -735,7 +896,7 @@ float errorTrial(unsigned int testIterations, unsigned int testPrime, unsigned i
 	// We assume throughout that signalSize is divisible by T_PER_B
 	const int numBlocks = signalSize/T_PER_B;
 
-	// Run at least 50 testIterations
+	// Run at least 50 testIterations. We'll encounter a floating point error later on if we don't
 	if (testIterations<50)
 		testIterations = 50;
 
@@ -872,13 +1033,10 @@ float errorTrial(unsigned int testIterations, unsigned int testPrime, unsigned i
 			cutilCheckMsg("Kernel execution failed [ computeErrorVector ]");
 			float maxerr = findMaxErrorHOST(dev_errArr, host_errArr, signalSize);
 			if (maxerr >= 0.5f) {
-					printf("max abs error = %f, is too high. Exiting\n", maxerr);
+					if (opt_verbose)
+						printf("max abs error = %f, is too high. Exiting\n", maxerr);
 					totalTime = -1;
 					break;
-			} else if (maxerr == 0.0f) {
-				printf("max abs error = 0. This should never happen\n");
-				totalTime = -1;
-				break;
 			} else if (opt_verbose)
 					printf("\n[%d/50]: iteration %d: max abs error = %f", iter/(testPrime/50), iter, maxerr);
 
@@ -993,7 +1151,7 @@ void print_residue(int testPrime, int *h_signalOUT, int signalSize) {
 	unsigned long c = signalSize - b; 
 	int totalbits = 64;
 	
-	printf("M_%d, ", testPrime);
+	printf("M( %d )C, ", testPrime);
 	
 	int sudden_death = 0; 
 	long long int NminusOne = signalSize - 1; 
@@ -1023,7 +1181,7 @@ void print_residue(int testPrime, int *h_signalOUT, int signalSize) {
 
 	if (hex == NULL && (hex = (unsigned long *)calloc(totalbits/8 + 1, sizeof(unsigned long))) == NULL) {
 			printf("Cannot get memory for residue bits; calloc()\n");
-			exit(1);
+			exit(-1);
 	}
 	
 	j = 0;
@@ -1048,7 +1206,7 @@ void print_residue(int testPrime, int *h_signalOUT, int signalSize) {
 			printf("%02lx", hex[j]);
 	}
 	
-	printf(", n = %d, gpuLucas\n", signalSize);
+	printf(", n = %d, %s v%s\n", signalSize, program_name, program_version);
 	return;
 }
 
@@ -1150,7 +1308,8 @@ void mersenneTest(unsigned int testPrime, unsigned int signalSize) {
 			cutilCheckMsg("Kernel execution failed [ computeErrorVector ]");
 
 			float maxerr = findMaxErrorHOST(dev_errArr, host_errArr, signalSize);
-			printf("\n[%d/50]: iteration %d: max abs error = %f", iter/(testPrime/50), iter, maxerr);
+			if (!opt_quiet)
+				printf("[%d/50]: iteration %d: max abs error = %f\n", iter/(testPrime/50), iter, maxerr);
 			fflush(stdout);
 		} else {
 			invDWTproductMinus2<<<numBlocks, T_PER_B>>>(llint_signal, d_signal, dev_Ainv, signalSize);
@@ -1183,8 +1342,6 @@ void mersenneTest(unsigned int testPrime, unsigned int signalSize) {
 		}
 	}
 	if (nonZeros) {
-		printf("\nM_%d tests as non-prime.\n", testPrime);
-
 		if (testPrime < 50000) {
 			for (unsigned int i = 0; i < signalSize; i++) {
 			//	unsigned char ch = h_signal[i] & 0xFF;
@@ -1201,7 +1358,7 @@ void mersenneTest(unsigned int testPrime, unsigned int signalSize) {
 		print_residue(testPrime, h_signalOUT, signalSize);
 	}
 	else
-		printf("\nM_%d tests as prime.\n", testPrime);
+		printf("\n\n\n\aPRIME FOUND: M_%d tests as prime.\n", testPrime);
 
 
 	//Destroy CUFFT context
