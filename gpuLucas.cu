@@ -750,12 +750,14 @@ unsigned int findSignalSize(unsigned int testPrime) {
 	float bestTime = 99999;
 	uint64_t signalSize; // need to be bigger than necessary so some of the FFTlen combinations don't overflow
 	// Only use lengths that are between 1/15th and 1/20th the testPrime
-	int max_nx = testPrime / 17;
-	int min_nx = testPrime / 20;
-restart_findSignalSize:
+	// and round it up to the nearest T_PER_B size, since we're only testing multiples of T_PER_B
+	int max_nx = ((testPrime / 17 / T_PER_B) + 1) * T_PER_B;
+	int min_nx = ((testPrime / 20 / T_PER_B) + 1) * T_PER_B;
+
 	if (!opt_quiet)
 		printf("Testing FFT lengths between %d and %d\n\n", min_nx, max_nx);
 
+restart_findSignalSize:
 	cudaEvent_t start_findSignalSize, stop_findSignalSize;
 	cutilSafeCall(cudaEventCreate(&start_findSignalSize));
 	cutilSafeCall(cudaEventCreate(&stop_findSignalSize));
@@ -915,8 +917,8 @@ restart_findSignalSize:
 	// Should only happen on smaller testPrimes, so won't increase run-time on larger testPrimes
 	if (optimal_length == 0) {
 		printf("Could not find a signalSize; Increasing search range\n");
-		max_nx = max_nx + 512;
-		min_nx = std::max((unsigned int)std::max(min_nx - 512, 0), testPrime/21);
+		min_nx = max_nx;
+		max_nx = max_nx + 4*T_PER_B;
 		goto restart_findSignalSize;
 	}
 		
