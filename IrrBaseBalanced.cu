@@ -50,12 +50,12 @@
  * @template-param number - number of subsequent digits to distribute product bits
  */
 template <int number>
-static __global__ void llintToIrrBal(int *iArr, int *hiArr, long long int *lliArr, unsigned char *bperW8arr, const int size) {
+static __global__ void llintToIrrBal(int *iArr, int *hiArr, int64_t *lliArr, unsigned char *bperW8arr, const int size) {
 	const int tid = blockIdx.x*blockDim.x + threadIdx.x;
 	const int tba = threadIdx.x; // thread block address for digits index
 
 	// Use int for each element, the radix place and its n preceeding
-	__shared__ long long int digits[T_PER_B + number];
+	__shared__ int64_t digits[T_PER_B + number];
 	__shared__ int signs[T_PER_B + number];
 	
 	// first n threads of block initialize leading digits.

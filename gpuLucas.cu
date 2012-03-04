@@ -49,7 +49,7 @@
 ******************************************************************************
 * Tested:  GTX480 and Tesla C2050, Cuda versions 3.2, 4.0, 4.1
 * Compiled with Visual Studio 2008, x64.
-*   Uses 64-bit (long long int) and will probably not work in 32-bit x86.
+*   Uses 64-bit (int64_t) and will probably not work in 32-bit x86.
 *
 * Files:
 *    gpuLucas.cu -- main file, including main() and mersenneTest() functions
@@ -160,7 +160,11 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <iostream>
 #include <math.h>
+#include <stdint.h>
+// most compilers do not have support for __float128 and needs an external library to
+// support extended precision
 #include <qd/dd_real.h>
 
 // includes, project
@@ -267,7 +271,7 @@ static __host__ void computeBitsPerWordVectors(unsigned char *bitsPerWord8, int 
  * code for convolution error-checking
  */
 static __global__ void computeErrorVector(float *errorvals, double *fftOut, int size);
-static __global__ void computeMaxBitVector(float *dev_errArr, long long *llint_signal, int len);
+static __global__ void computeMaxBitVector(float *dev_errArr, int64_t *llint_signal, int len);
 static __host__ float findMaxErrorHOST(float *dev_fltArr, float *host_temp, int len);
 
 /**
@@ -281,8 +285,8 @@ static __host__ void computeWeightVectors(double *host_A, double *host_Ainv, int
  * This completes the invDWT transform by multiplying the signal by a_inv,
  *   and subtracts 2 from signal[0], requiring no carry in current weighted carry-save state
  */
-static __global__ void invDWTproductMinus2ERROR(long long int *llintArr, double *signal, double *a_inv, int size);
-static __global__ void invDWTproductMinus2(long long int *llintArr, double *signal, double *a_inv, int size);
+static __global__ void invDWTproductMinus2ERROR(int64_t *llintArr, double *signal, double *a_inv, int size);
+static __global__ void invDWTproductMinus2(int64_t *llintArr, double *signal, double *a_inv, int size);
 
 
 /**
@@ -298,7 +302,7 @@ static __global__ void invDWTproductMinus2(long long int *llintArr, double *sign
  * Use llintToIrrBal<2,3,4,5,6>, as appropriate.  And yes, we can have pointers
  *   to global kernels.  (Works fine, just address.)
  */
-void (*sliceAndDice)(int *iArr, int *hiArr, long long int *lliArr, unsigned char *bperW8arr, const int size);
+void (*sliceAndDice)(int *iArr, int *hiArr, int64_t *lliArr, unsigned char *bperW8arr, const int size);
 
 /**
  * For n = 2 to 6. This uses templated kernel functions for the different lengths,
@@ -468,8 +472,8 @@ int main(int argc, char* argv[]) {
 	setSliceAndDice(testPrime, signalSize);
 
 
-	if ((int)sizeof(long long int) != 8) {
-		printf("size of long long int = %d (if not 8, you're in trouble)\n", (int) sizeof(long long int));
+	if ((int)sizeof(int64_t) != 8) {
+		printf("size of int64_t = %d (if not 8, you're in trouble)\n", (int) sizeof(int64_t));
 		exit(-1);
 	}
 
@@ -604,7 +608,7 @@ static __host__ void computeWeightVectors(double *host_A, double *host_Ainv, int
 	for (int ddex = 0; ddex < size; ddex++) {
 		dd_real dd_expo = dd_real(ddex)*dd_real(testPrime)/dd_N;
 		dd_A = pow(dd_2, ceil(dd_expo) - dd_expo);
-		dd_Ainv = 1.0/dd_A/dd_N;
+		dd_Ainv = (1.0 / dd_A) / dd_N;
 		host_A[ddex] = to_double(dd_A);
 		host_Ainv[ddex] = to_double(dd_Ainv);
 	}
@@ -668,7 +672,7 @@ static __global__ void loadIntToDoubleIBDWT(double *dArr, int *iArr, int *iHiArr
  *   current balanced carry-save signal.
  */
 // Error version assigns non-rounded double value back to signal[tid]
-static __global__ void invDWTproductMinus2ERROR(long long int *llintArr, double *signal, double *a_inv, int size) {
+static __global__ void invDWTproductMinus2ERROR(int64_t *llintArr, double *signal, double *a_inv, int size) {
 
 	const int tid = blockIdx.x*blockDim.x + threadIdx.x;
 
@@ -683,7 +687,7 @@ static __global__ void invDWTproductMinus2ERROR(long long int *llintArr, double 
 }
 
 // Non error version doesn't assign non-rounded double value back to signal[tid]
-static __global__ void invDWTproductMinus2(long long int *llintArr, double *signal, double *a_inv, int size) {
+static __global__ void invDWTproductMinus2(int64_t *llintArr, double *signal, double *a_inv, int size) {
 
 	const int tid = blockIdx.x*blockDim.x + threadIdx.x;
 
@@ -721,10 +725,10 @@ static __host__ float findMaxErrorHOST(float *dev_fltArr, float *host_temp, int 
 
 /**
  *computeMaxVector()
- *function returns list of number of significant bits of a list of long longs
+ *function returns list of number of significant bits of a list of int64_ts
  *AS IS, list can only be as long as however many strings you can launch, now 67,107,840 on 2.0 gpus
  */
-static __global__ void computeMaxBitVector(float *dev_errArr, long long *llint_signal, int len){
+static __global__ void computeMaxBitVector(float *dev_errArr, int64_t *llint_signal, int len){
 	int tid = threadIdx.x + blockIdx.x*blockDim.x;
 	if (tid < len){
 		if (llint_signal[tid] >= 0){
@@ -744,7 +748,7 @@ static __global__ void computeMaxBitVector(float *dev_errArr, long long *llint_s
 unsigned int findSignalSize(unsigned int testPrime) {
 	int optimal_length = 0;
 	float bestTime = 99999;
-	long long unsigned int signalSize; // need to be bigger than necessary so some of the FFTlen combinations don't overflow
+	uint64_t signalSize; // need to be bigger than necessary so some of the FFTlen combinations don't overflow
 	// Only use lengths that are between 1/15th and 1/20th the testPrime
 	int max_nx = testPrime / 17;
 	int min_nx = testPrime / 20;
@@ -784,10 +788,10 @@ restart_findSignalSize:
 						int d_size = sizeof(Real)*signalSize;
 						int z_size = sizeof(Complex)*(signalSize/2 + 1);
 						int bpw_size = sizeof(unsigned char)*signalSize;
-						int llintSignalSize = sizeof(long long int)*signalSize;
+						int llintSignalSize = sizeof(int64_t)*signalSize;
 						Real *dev_A, *dev_Ainv;
 						unsigned char *bitsPerWord8;
-						long long int *llint_signal;
+						int64_t *llint_signal;
 						cutilSafeCall(cudaMalloc((void**)&i_signalOUT, i_sizeOUT));
 						cutilSafeCall(cudaMalloc((void**)&d_signal, d_size));
 						cutilSafeCall(cudaMalloc((void**)&z_signal, z_size));
@@ -852,7 +856,7 @@ restart_findSignalSize:
 							cutilCheckMsg("Kernel execution failed [ computeErrorVector ]");
 							
 							float this_err = findMaxErrorHOST(dev_errArr, host_errArr, signalSize);
-							maxerr = max(this_err, maxerr);
+							maxerr = std::max(this_err, maxerr);
 							
 							sliceAndDice<<<numBlocks, T_PER_B>>>(i_signalOUT, i_hiBitArr, llint_signal, bitsPerWord8, signalSize);
 							cutilCheckMsg("Kernel execution failed [ sliceAndDice ]");
@@ -912,7 +916,7 @@ restart_findSignalSize:
 	if (optimal_length == 0) {
 		printf("Could not find a signalSize; Increasing search range\n");
 		max_nx = max_nx + 512;
-		min_nx = max(max(min_nx - 512, 0), testPrime/21);
+		min_nx = std::max((unsigned int)std::max(min_nx - 512, 0), testPrime/21);
 		goto restart_findSignalSize;
 	}
 		
@@ -952,11 +956,11 @@ float errorTrial(unsigned int testIterations, unsigned int testPrime, unsigned i
 	int z_size = sizeof(Complex)*(signalSize/2 + 1);
 	int bpw_size = sizeof(unsigned char)*signalSize;
 
-	int llintSignalSize = sizeof(long long int)*signalSize;
+	int llintSignalSize = sizeof(int64_t)*signalSize;
 
 	Real *dev_A, *dev_Ainv;
 	unsigned char *bitsPerWord8;
-	long long int *llint_signal;
+	int64_t *llint_signal;
 	cutilSafeCall(cudaMalloc((void**)&i_signalOUT, i_sizeOUT));
 	cutilSafeCall(cudaMalloc((void**)&d_signal, d_size));
 	cutilSafeCall(cudaMalloc((void**)&z_signal, z_size));
@@ -990,7 +994,7 @@ float errorTrial(unsigned int testIterations, unsigned int testPrime, unsigned i
 	cutilSafeCall(cudaMemcpy(bitsPerWord8, h_bitsPerWord8, bpw_size, cudaMemcpyHostToDevice));
 
 	if (opt_verbose) {
-		for (unsigned int i = 0; i < 20; i++) {
+		for (int i = 0; i < 20; i++) {
 			printf("word[%d] numbits = %d\n", i, h_bitsPerWord[i]);
 			printf("numbits of this and following 7 are: ");
 			for (int bit = 1; bit < 256; bit *= 2)
@@ -1175,20 +1179,20 @@ float errorTrial(unsigned int testIterations, unsigned int testPrime, unsigned i
 *   needed for result submission to GIMPS, or verifying results with other clients
 */
 void print_residue(int testPrime, int *h_signalOUT, int signalSize) {
-	static unsigned long int *hex = NULL;
-	static unsigned long int prior_hex = 0;
+	static uint64_t *hex = NULL;
+	static uint64_t prior_hex = 0;
 
-	long long int k, j=0, i, word, k1;
+	int64_t k, j=0, i, word, k1;
 	double lo = floor((exp(floor((double)testPrime/signalSize)*log(2.0)))+0.5);
 	double hi = lo+lo;
-	unsigned long b = testPrime % signalSize; 
-	unsigned long c = signalSize - b; 
+	uint64_t b = testPrime % signalSize; 
+	uint64_t c = signalSize - b; 
 	int totalbits = 64;
 	
 	printf("M( %d )C, ", testPrime);
 	
 	int sudden_death = 0; 
-	long long int NminusOne = signalSize - 1; 
+	int64_t NminusOne = signalSize - 1; 
 
 	while (1) {
 			k = j;
@@ -1213,7 +1217,7 @@ void print_residue(int testPrime, int *h_signalOUT, int signalSize) {
 			prior_hex = totalbits/8 + 1;
 	}
 
-	if (hex == NULL && (hex = (unsigned long *)calloc(totalbits/8 + 1, sizeof(unsigned long))) == NULL) {
+	if (hex == NULL && (hex = (uint64_t *)calloc(totalbits/8 + 1, sizeof(uint64_t))) == NULL) {
 			printf("Cannot get memory for residue bits; calloc()\n");
 			exit(-1);
 	}
@@ -1221,11 +1225,11 @@ void print_residue(int testPrime, int *h_signalOUT, int signalSize) {
 	j = 0;
 	i = 0;
 	do {
-			k = (long)(ceil((double)testPrime*(j + 1)/signalSize) - ceil((double)testPrime*j/signalSize));
+			k = (int64_t)(ceil((double)testPrime*(j + 1)/signalSize) - ceil((double)testPrime*j/signalSize));
 			if (k > totalbits)
 					k = totalbits;
 			totalbits -= k;
-			word = (long)h_signalOUT[j + ((j & 0) >> 0)];
+			word = (int64_t)h_signalOUT[j + ((j & 0) >> 0)];
 			for (j++; k > 0; k--, i++) {
 					if (i % 8 == 0)
 							hex[i/8] = 0L;
@@ -1274,11 +1278,11 @@ void mersenneTest(unsigned int testPrime, unsigned int signalSize, Real *d_signa
 	int z_size = sizeof(Complex)*(signalSize/2 + 1);
 	int bpw_size = sizeof(unsigned char)*signalSize;
 
-	int llintSignalSize = sizeof(long long int)*signalSize;
+	int llintSignalSize = sizeof(int64_t)*signalSize;
 
 	Real *dev_A, *dev_Ainv;
 	unsigned char *bitsPerWord8;
-	long long int *llint_signal;
+	int64_t *llint_signal;
 	cutilSafeCall(cudaMalloc((void**)&i_signalOUT, i_sizeOUT));
 //	cutilSafeCall(cudaMalloc((void**)&d_signal, d_size));
 	cutilSafeCall(cudaMalloc((void**)&z_signal, z_size));
