@@ -501,7 +501,8 @@ int main(int argc, char* argv[]) {
 	// But not so many it takes forever on larger testPrimes
 	testIterations = min(2500, testIterations);
 	if (!opt_quiet)
-		printf("\nRunning %d iterations in an error trial test before beginning full test...\n", testIterations);
+		printf("\nRunning %d iterations in an error trial test before %s full test...\n",
+				testIterations, resuming == 1 ? "resuming" : "beginning");
 	float elapsedMsecDEV = errorTrial(testIterations, testPrime, signalSize);
 
 	// stop the timer
