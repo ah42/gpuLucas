@@ -495,11 +495,14 @@ int main(int argc, char* argv[]) {
 	// return value is average time per Lucas-Lehmer iteration based on
 	//   GPU timings
 	int trialFraction = 10000;
+	int testIterations = testPrime / trialFraction;
 	// Make sure we run at least a couple iterations through errorTrial in case testPrime is too small
-	trialFraction = testPrime/100 < trialFraction ? testPrime/100 : trialFraction;
+	testIterations = max(100, testIterations);
+	// But not so many it takes forever on larger testPrimes
+	testIterations = min(2500, testIterations);
 	if (!opt_quiet)
-		printf("\nRunning error trial test before beginning full test...\n");
-	float elapsedMsecDEV = errorTrial(testPrime/trialFraction, testPrime, signalSize);
+		printf("\nRunning %d iterations in an error trial test before beginning full test...\n", testIterations);
+	float elapsedMsecDEV = errorTrial(testIterations, testPrime, signalSize);
 
 	// stop the timer
 	cutilSafeCall(cudaEventRecord(errorTrial_stop, 0));
@@ -757,6 +760,7 @@ unsigned int findSignalSize(unsigned int testPrime) {
 	if (!opt_quiet)
 		printf("Testing FFT lengths between %d and %d\n\n", min_nx, max_nx);
 
+	int retry = 0;
 restart_findSignalSize:
 	cudaEvent_t start_findSignalSize, stop_findSignalSize;
 	cutilSafeCall(cudaEventCreate(&start_findSignalSize));
@@ -835,10 +839,11 @@ restart_findSignalSize:
 						cutilCheckMsg("Kernel execution failed [ loadValue4ToFFTarray ]");
 						
 						int numFFTblocks = (signalSize/2 + 1)/T_PER_B + 1;
-						
+					
+						int iter = 2;
 						// start timer
 						cutilSafeCall(cudaEventRecord(start_findSignalSize, 0));
-						for (int iter = 2; iter < testIterations; iter++) {
+						for (; iter < testIterations; iter++) {
 							// Transform signal
 							cufftSafeCall(CUFFT_EXECFORWARD(plan1, (Real *)d_signal, (Complex *)z_signal));
 							cutilCheckMsg("Kernel execution failed [ CUFFT_EXECFORWARD ]");
@@ -860,6 +865,9 @@ restart_findSignalSize:
 							float this_err = findMaxErrorHOST(dev_errArr, host_errArr, signalSize);
 							maxerr = std::max(this_err, maxerr);
 							
+							if (maxerr >= ERROR_LIMIT) // no need to continue this test
+								break;
+
 							sliceAndDice<<<numBlocks, T_PER_B>>>(i_signalOUT, i_hiBitArr, llint_signal, bitsPerWord8, signalSize);
 							cutilCheckMsg("Kernel execution failed [ sliceAndDice ]");
 							
@@ -893,7 +901,7 @@ restart_findSignalSize:
 						cutilSafeCall(cudaFree(dev_errArr));
 
 						if (!opt_quiet)
-							printf("Testing signalSize %d, time: %3.2fms, error: %1.8f", (int)signalSize, elapsedTime/testIterations, maxerr);
+							printf("Testing signalSize %d, time: %3.2fms, error: %1.4f", (int)signalSize, elapsedTime/iter, maxerr);
 
 						if (maxerr < ERROR_LIMIT) {
 							if (elapsedTime < bestTime) {
@@ -916,9 +924,15 @@ restart_findSignalSize:
 	// If we haven't found a usable length, increase the search range slightly.
 	// Should only happen on smaller testPrimes, so won't increase run-time on larger testPrimes
 	if (optimal_length == 0) {
-		printf("Could not find a signalSize; Increasing search range\n");
+		if (!opt_quiet)
+			printf("Could not find a signalSize; Increasing search range\n");
 		min_nx = max_nx;
 		max_nx = max_nx + 4*T_PER_B;
+		retry++;
+		if (retry > 100) { // Should this provide a wide enough range before bailing out?
+			fprintf(stderr, "Could not find a suitable signalSize, exiting\n");
+			exit (-1);
+		}
 		goto restart_findSignalSize;
 	}
 		
@@ -937,6 +951,7 @@ float errorTrial(unsigned int testIterations, unsigned int testPrime, unsigned i
 	const int numBlocks = signalSize/T_PER_B;
 
 	// Run at least 50 testIterations. We'll encounter a floating point error later on if we don't
+	// main() calls us with at least 100 iterations already, so this shouldn't happen
 	if (testIterations<50)
 		testIterations = 50;
 
