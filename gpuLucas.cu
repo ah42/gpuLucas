@@ -203,6 +203,8 @@ int resuming = 0;
 // checkpoint filename buffers
 char checkpoint_file[32];
 char checkpoint_backup[32];
+// Default checkpoint interval in iterations:
+int checkpoint_freq = 10000;
 
 __constant__ int LO_BITS;
 __constant__ int HI_BITS;
@@ -352,9 +354,10 @@ Real *readCheckpoint(unsigned int testPrime, unsigned int *signalSize, unsigned 
  */
 void print_help() {
 	fprintf(stderr, "%s (v%s):\n\n", program_name, program_version);
-	fprintf(stderr, "\t-d\tspecify CUDA device to use\n");
-	fprintf(stderr, "\t-v\tenable verbose output\n");
-	fprintf(stderr, "\t-q\tdisable verbose output\n");
+	fprintf(stderr, "\t-c\tspecify checkpoint frequency (default 10000 iterations\n");
+	fprintf(stderr, "\t-d\tspecify CUDA device to use (default 0)\n");
+	fprintf(stderr, "\t-v\tbe more verbose\n");
+	fprintf(stderr, "\t-q\tbe less verbose\n");
 	fprintf(stderr, "\t-f\tspecify signalLength (must be divisible by %d)\n", T_PER_B);
 	fprintf(stderr, "\t-n\tspecify number to be tested\n");
 }
@@ -368,7 +371,7 @@ int main(int argc, char* argv[]) {
 	int use_device = 0;
 
 	// getopt: parse command line options
-	while (( c = getopt(argc, argv, "hvqf:n:d:")) != -1) {
+	while (( c = getopt(argc, argv, "hvqf:n:d:c:")) != -1) {
 		switch (c) {
 			case 'h':
 				print_help();
@@ -392,7 +395,11 @@ int main(int argc, char* argv[]) {
 				testPrime = atoi(optarg);
 				break;
 			case 'd':
-
+				use_device = atoi(optarg);
+				break;
+			case 'c':
+				checkpoint_freq = atoi(optarg);
+				break;
 			case '?':
 				if (optopt == 'f' || optopt == 'n') {
 					print_help();
@@ -449,7 +456,7 @@ int main(int argc, char* argv[]) {
 
 	// Chosen device = use_device
 	cudaGetDeviceProperties(&deviceProp, use_device);
-	fprintf(stderr, "Using selected device %d: %s\n\n", use_device, deviceProp.name);
+	fprintf(stderr, "Using device %d: %s\n\n", use_device, deviceProp.name);
 	cudaSetDevice(use_device);
 
 	unsigned int resume_iter;
@@ -459,9 +466,9 @@ int main(int argc, char* argv[]) {
 
 	if (signalSize == 0)  {
 		signalSize = findSignalSize(testPrime);
-		printf("\nOptimal signalSize detected: %d\n\n", signalSize);
+		printf("Optimal signalSize detected: %d\n\n", signalSize);
 	} else
-		printf("Using specified FFT runlength %d\n", signalSize);
+		printf("Using specified FFT runlength %d\n\n", signalSize);
 
 	// BEGIN by initializing constant memory on device
 	initConstantSymbols(testPrime, signalSize);
@@ -478,7 +485,7 @@ int main(int argc, char* argv[]) {
 	}
 
 	printf("Testing M%d, using an irrational base with wordlengths (%d, %d),\n"
-		   "\tgiving an FFT runlength of 2^%f = %d\n",
+		   "\tusing an FFT runlength of 2^%f = %d\n",
 		   testPrime, h_LO_BITS, h_HI_BITS, log(1.0*signalSize)/log(2.0), signalSize);
 	if (!opt_quiet)
 		printf("\n\tNUM_BLOCKS = %d, T_PER_B = %d\n", signalSize/T_PER_B, T_PER_B);
@@ -494,12 +501,19 @@ int main(int argc, char* argv[]) {
 	//  as well as FFT timings and rebalancing time.
 	// return value is average time per Lucas-Lehmer iteration based on
 	//   GPU timings
-	int trialFraction = 10000;
-	int testIterations = testPrime / trialFraction;
-	// Make sure we run at least a couple iterations through errorTrial in case testPrime is too small
-	testIterations = max(100, testIterations);
-	// But not so many it takes forever on larger testPrimes
-	testIterations = min(2500, testIterations);
+	int testIterations, trialFraction;
+	if (!resuming) {
+		trialFraction = 10000;
+		testIterations = testPrime / trialFraction;
+		// Make sure we run at least a couple iterations through errorTrial in case testPrime is too small
+		testIterations = max(100, testIterations);
+		// But not so many it takes forever on larger testPrimes
+		testIterations = min(2500, testIterations);
+	} else {
+		// Only need a limited run on resuming, to establish timing
+		testIterations = 100;
+		trialFraction = testPrime / testIterations;
+	}
 	if (!opt_quiet)
 		printf("\nRunning %d iterations in an error trial test before %s full test...\n",
 				testIterations, resuming == 1 ? "resuming" : "beginning");
@@ -521,7 +535,7 @@ int main(int argc, char* argv[]) {
 			cutilDeviceReset();
 			exit(EXIT_FAILURE);
 	} else
-		printf("Error trial completed successfully.\n");
+		printf("\nError trial completed successfully.\n");
 
 	if (!opt_quiet) {
 		printf("\nTiming:  To test M%d"
@@ -1207,8 +1221,6 @@ void print_residue(int testPrime, int *h_signalOUT, int signalSize) {
 	uint64_t c = signalSize - b; 
 	int totalbits = 64;
 	
-	printf("M( %d )C, ", testPrime);
-	
 	int sudden_death = 0; 
 	int64_t NminusOne = signalSize - 1; 
 
@@ -1261,8 +1273,6 @@ void print_residue(int testPrime, int *h_signalOUT, int signalSize) {
 	for (j = (i - 1)/8; j >= 0; j--) {
 			printf("%02lx", hex[j]);
 	}
-	
-	printf(", n = %d, %s v%s\n", signalSize, program_name, program_version);
 	return;
 }
 
@@ -1347,9 +1357,9 @@ void mersenneTest(unsigned int testPrime, unsigned int signalSize, Real *d_signa
 		cutilCheckMsg("Kernel execution failed [ loadValue4ToFFTarray ]");
 	}
 
+	float maxerr = 0.0f;
 	// Loop M-2 times
 	for (; iter < testPrime; iter++) {
-
 		// Transform signal
 		cufftSafeCall(CUFFT_EXECFORWARD(plan1, (Real *)d_signal, (Complex *)z_signal));
 		cutilCheckMsg("Kernel execution failed [ CUFFT_EXECFORWARD ]");
@@ -1362,17 +1372,14 @@ void mersenneTest(unsigned int testPrime, unsigned int signalSize, Real *d_signa
 		cufftSafeCall(CUFFT_EXECINVERSE(plan2, (Complex *)z_signal, (Real *)d_signal));
 		cutilCheckMsg("Kernel execution failed [ CUFFT_EXECINVERSE ]");
 
-		//    Every 1/50th of the way done, do some error testing
-		if (iter % (testPrime/50) == 0) {
+		// Every checkpoint, do some error testing. Need to do this here, but checkpoint is later.
+		if (iter % checkpoint_freq == 1) {
 			invDWTproductMinus2ERROR<<<numBlocks, T_PER_B>>>(llint_signal, d_signal, dev_Ainv, signalSize);
 			cutilCheckMsg("Kernel execution failed [ invDWTproductMinus2ERROR ]");
 			computeErrorVector<<<numBlocks, T_PER_B>>>(dev_errArr, d_signal, signalSize);
 			cutilCheckMsg("Kernel execution failed [ computeErrorVector ]");
 
-			float maxerr = findMaxErrorHOST(dev_errArr, host_errArr, signalSize);
-			if (!opt_quiet)
-				printf("[%d/50]: iteration %d: max abs error = %f\n", iter/(testPrime/50), iter, maxerr);
-			fflush(stdout);
+			maxerr = findMaxErrorHOST(dev_errArr, host_errArr, signalSize);
 		} else {
 			invDWTproductMinus2<<<numBlocks, T_PER_B>>>(llint_signal, d_signal, dev_Ainv, signalSize);
 			cutilCheckMsg("Kernel execution failed [ invDWTproductMinus2 ]");
@@ -1385,11 +1392,23 @@ void mersenneTest(unsigned int testPrime, unsigned int signalSize, Real *d_signa
 		loadIntToDoubleIBDWT<<<numBlocks, T_PER_B>>>(d_signal, i_signalOUT, i_hiBitArr, dev_A, signalSize);
 		cutilCheckMsg("Kernel execution failed [ loadIntToDoubleIBDWT ]");
 
-		// checkpoint every 10000 iterations
-		if (iter % 1000 == 0) {
+		// Checkpoint every checkpoint_freq iterations
+		// To match CUDALucas output: CL counts iterations differently and thus displays residue at what we consider to be iteration+1
+		if (iter % checkpoint_freq == 1) {
 			cutilDeviceSynchronize();
 			cutilSafeCall(cudaMemcpy(cp_signalOUT, d_signal, sizeof(Real) * signalSize, cudaMemcpyDeviceToHost));
 			writeCheckpoint(cp_signalOUT, testPrime, signalSize, iter + 1);
+
+			if (!opt_quiet) {
+				// Display current iteration's residue and error
+				addPseudoBalanced<<<numBlocks, T_PER_B>>>(i_signalOUT, i_hiBitArr, signalSize);
+				rebalanceIrrIntSEQGPU<<<1, 1>>>(i_signalOUT, bitsPerWord8, signalSize);
+				cutilSafeCall(cudaMemcpy(h_signalOUT, i_signalOUT, i_sizeOUT, cudaMemcpyDeviceToHost));
+				// Lie about the current iteration to match other programs
+				printf("[%4.1f%%] Iteration %d: max err = %1.4f, ", 100.0f * (float)iter / (float)testPrime, iter - 1, maxerr);
+				print_residue(testPrime, h_signalOUT, signalSize);
+				printf("\n");
+			}
 		}
 	}
 
@@ -1411,7 +1430,7 @@ void mersenneTest(unsigned int testPrime, unsigned int signalSize, Real *d_signa
 		}
 	}
 	if (nonZeros) {
-		if (testPrime < 50000) {
+		if (testPrime < 50000 & opt_verbose) {
 			for (unsigned int i = 0; i < signalSize; i++) {
 			//	unsigned char ch = h_signal[i] & 0xFF;
 
@@ -1423,11 +1442,17 @@ void mersenneTest(unsigned int testPrime, unsigned int signalSize, Real *d_signa
 			}
 			printf("\n");
 		}
-		printf("\nM_%d tests as non-prime.\n", testPrime);
+		if (opt_verbose)
+			printf("\nM_%d tests as non-prime.\n\n", testPrime);
+
+		printf("\nM( %d )C, ", testPrime);
 		print_residue(testPrime, h_signalOUT, signalSize);
+	} else {
+		printf("\n\n\aPRIME FOUND: M_%d tests as prime.", testPrime);
+		printf("\nM( %d )P", testPrime);
+
 	}
-	else
-		printf("\n\n\n\aPRIME FOUND: M_%d tests as prime.\n", testPrime);
+	printf(", n = %d, %s v%s\n", signalSize, program_name, program_version);
 
 
 	//Destroy CUFFT context
