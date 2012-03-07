@@ -255,7 +255,6 @@ static __host__ void computeBitsPerWordVectors(unsigned char *bitsPerWord8, int 
 /**
  * code for convolution error-checking
  */
-static __global__ void computeErrorVector(float *errorvals, double *fftOut, int size);
 static __global__ void computeMaxBitVector(float *dev_errArr, int64_t *llint_signal, int len);
 static __host__ float findMaxErrorHOST(float *dev_fltArr, float *host_temp, int len);
 
@@ -270,8 +269,8 @@ static __host__ void computeWeightVectors(double *host_A, double *host_Ainv, int
  * This completes the invDWT transform by multiplying the signal by a_inv,
  *   and subtracts 2 from signal[0], requiring no carry in current weighted carry-save state
  */
-static __global__ void invDWTproductMinus2ERROR(int64_t *llintArr, double *signal, double *a_inv, int size);
-static __global__ void invDWTproductMinus2(int64_t *llintArr, double *signal, double *a_inv, int size);
+template <int error>
+static __global__ void invDWTproductMinus2(int64_t *llintArr, double *signal, double *a_inv, float *errorvals, int size);
 
 
 /**
@@ -674,8 +673,9 @@ static __global__ void loadIntToDoubleIBDWT(double *dArr, int *iArr, int *iHiArr
  * We also do the subtract 2 from the Lucas-square, requiring no carry in the
  *   current balanced carry-save signal.
  */
-// Error version assigns non-rounded double value back to signal[tid]
-static __global__ void invDWTproductMinus2ERROR(int64_t *llintArr, double *signal, double *a_inv, int size) {
+// Error version assigns the round-off error back to errorvals[tid]
+template <int error_flag>
+static __global__ void invDWTproductMinus2(int64_t *llintArr, double *signal, double *a_inv, float *errorvals, int size) {
 
 	const int tid = blockIdx.x*blockDim.x + threadIdx.x;
 
@@ -686,30 +686,9 @@ static __global__ void invDWTproductMinus2ERROR(int64_t *llintArr, double *signa
 		sig = signal[tid]*a_inv[tid];
 
 	llintArr[tid] = double2ll(sig, cudaRoundNearest);
-	signal[tid] = sig;
-}
-
-// Non error version doesn't assign non-rounded double value back to signal[tid]
-static __global__ void invDWTproductMinus2(int64_t *llintArr, double *signal, double *a_inv, int size) {
-
-	const int tid = blockIdx.x*blockDim.x + threadIdx.x;
-
-	double sig;
-
-	if (tid == 0)
-		sig = signal[tid]*a_inv[tid] - 2.0;
-	else
-		sig = signal[tid]*a_inv[tid];
-	llintArr[tid] = double2ll(sig, cudaRoundNearest);
-}
-
-
-static __global__ void computeErrorVector(float *errorvals, double *fftOut, int size) {
-
-	const int tid = blockIdx.x*blockDim.x + threadIdx.x;
-
-	double x = fftOut[tid];
-	errorvals[tid] = (float) fabs(x - llrint(x));
+	if (error_flag) {
+		errorvals[tid] = (float) fabs(sig - llrint(sig));
+	}
 }
 
 /**
@@ -857,10 +836,8 @@ restart_findSignalSize:
 							cutilCheckMsg("Kernel execution failed [ CUFFT_EXECINVERSE ]");
 
 							// Calculate error
-							invDWTproductMinus2ERROR<<<numBlocks, T_PER_B>>>(llint_signal, d_signal, dev_Ainv, signalSize);
+							invDWTproductMinus2<1><<<numBlocks, T_PER_B>>>(llint_signal, d_signal, dev_Ainv, dev_errArr, signalSize);
 							cutilCheckMsg("Kernel execution failed [ ivnDWTproductMinus2ERROR ]");
-							computeErrorVector<<<numBlocks, T_PER_B>>>(dev_errArr, d_signal, signalSize);
-							cutilCheckMsg("Kernel execution failed [ computeErrorVector ]");
 							
 							float this_err = findMaxErrorHOST(dev_errArr, host_errArr, signalSize);
 							maxerr = std::max(this_err, maxerr);
@@ -1082,10 +1059,9 @@ float errorTrial(unsigned int testIterations, unsigned int testPrime, unsigned i
 			cutilSafeCall(cudaEventDestroy(stop));
 
 			// ERROR TESTS
-			invDWTproductMinus2ERROR<<<numBlocks, T_PER_B>>>(llint_signal, d_signal, dev_Ainv, signalSize);
+			invDWTproductMinus2<1><<<numBlocks, T_PER_B>>>(llint_signal, d_signal, dev_Ainv, dev_errArr, signalSize);
 			cutilCheckMsg("Kernel execution failed [ ivnDWTproductMinus2ERROR ]");
-			computeErrorVector<<<numBlocks, T_PER_B>>>(dev_errArr, d_signal, signalSize);
-			cutilCheckMsg("Kernel execution failed [ computeErrorVector ]");
+
 			float maxerr = findMaxErrorHOST(dev_errArr, host_errArr, signalSize);
 			if (maxerr >= 0.5f) {
 					if (opt_verbose)
@@ -1132,7 +1108,7 @@ float errorTrial(unsigned int testIterations, unsigned int testPrime, unsigned i
 			cufftSafeCall(CUFFT_EXECINVERSE(plan2, (Complex *)z_signal, (Real *)d_signal));
 			cutilCheckMsg("Kernel execution failed [ CUFFT_EXECINVERSE ]");
 
-			invDWTproductMinus2<<<numBlocks, T_PER_B>>>(llint_signal, d_signal, dev_Ainv, signalSize);
+			invDWTproductMinus2<0><<<numBlocks, T_PER_B>>>(llint_signal, d_signal, dev_Ainv, dev_errArr, signalSize);
 			cutilCheckMsg("Kernel execution failed [ invDWTproductMinus2 ]");
 
 			sliceAndDice<<<numBlocks, T_PER_B>>>(i_signalOUT, i_hiBitArr, llint_signal, bitsPerWord8, signalSize);
@@ -1359,15 +1335,13 @@ void mersenneTest(unsigned int testPrime, unsigned int signalSize, Real *d_signa
 
 		// Every so often, do some error checking. Do this at every checkpoint as well
 		if ((iter % (testPrime/1000) == 0) | (iter % checkpoint_freq == 1)) {
-			invDWTproductMinus2ERROR<<<numBlocks, T_PER_B>>>(llint_signal, d_signal, dev_Ainv, signalSize);
+			invDWTproductMinus2<1><<<numBlocks, T_PER_B>>>(llint_signal, d_signal, dev_Ainv, dev_errArr, signalSize);
 			cutilCheckMsg("Kernel execution failed [ invDWTproductMinus2ERROR ]");
-			computeErrorVector<<<numBlocks, T_PER_B>>>(dev_errArr, d_signal, signalSize);
-			cutilCheckMsg("Kernel execution failed [ computeErrorVector ]");
 
 			maxerr = findMaxErrorHOST(dev_errArr, host_errArr, signalSize);
 			// FIXME: -Aaron: we need to add a way to stop/restart if the error is too high.
 		} else {
-			invDWTproductMinus2<<<numBlocks, T_PER_B>>>(llint_signal, d_signal, dev_Ainv, signalSize);
+			invDWTproductMinus2<0><<<numBlocks, T_PER_B>>>(llint_signal, d_signal, dev_Ainv, dev_errArr, signalSize);
 			cutilCheckMsg("Kernel execution failed [ invDWTproductMinus2 ]");
 		}
 
