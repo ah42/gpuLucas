@@ -1357,14 +1357,15 @@ void mersenneTest(unsigned int testPrime, unsigned int signalSize, Real *d_signa
 		cufftSafeCall(CUFFT_EXECINVERSE(plan2, (Complex *)z_signal, (Real *)d_signal));
 		cutilCheckMsg("Kernel execution failed [ CUFFT_EXECINVERSE ]");
 
-		// Every checkpoint, do some error testing. Need to do this here, but checkpoint is later.
-		if (iter % checkpoint_freq == 1) {
+		// Every so often, do some error checking. Do this at every checkpoint as well
+		if ((iter % (testPrime/1000) == 0) | (iter % checkpoint_freq == 1)) {
 			invDWTproductMinus2ERROR<<<numBlocks, T_PER_B>>>(llint_signal, d_signal, dev_Ainv, signalSize);
 			cutilCheckMsg("Kernel execution failed [ invDWTproductMinus2ERROR ]");
 			computeErrorVector<<<numBlocks, T_PER_B>>>(dev_errArr, d_signal, signalSize);
 			cutilCheckMsg("Kernel execution failed [ computeErrorVector ]");
 
 			maxerr = findMaxErrorHOST(dev_errArr, host_errArr, signalSize);
+			// FIXME: -Aaron: we need to add a way to stop/restart if the error is too high.
 		} else {
 			invDWTproductMinus2<<<numBlocks, T_PER_B>>>(llint_signal, d_signal, dev_Ainv, signalSize);
 			cutilCheckMsg("Kernel execution failed [ invDWTproductMinus2 ]");
