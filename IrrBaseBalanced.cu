@@ -7,7 +7,7 @@
 * 11/6/2010
 *
 ****************************************************************************
-*
+* Copyright (c) 2012, Aaron Haviland
 * Copyright (c) 2010-2012, Andrew Thall, Alma College
 * All rights reserved.
 *

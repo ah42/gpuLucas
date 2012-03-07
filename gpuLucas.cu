@@ -1,26 +1,8 @@
 /**
 * gpuLucas.cu
 *
-* A. Thall & A. Hegedus
-* Alma College
-* 9/1/2010
-*
-* Implementing the IBDWT method of Crandall in CUDA.
-*   This uses a variable base representation and a weighted tranformation
-* to reduce the FFT length and eliminate the modular reduction mod M_p.
-*
-* gpuLucas uses carry-save arithmetic to eliminate carry-adds beyond a single
-*   ripple-carry from each digit to the next, following the radix-restoration
-*   (dicing) of the convolution products.
-*
-* The radix-restoration code in IrrBaseBalanced.cu is an ugly kludge,
-*   slightly better with templating (thanks, Alex), but it makes up only 1/6th
-*   of the runtime, the rest being the weighted transform and componentwise
-*   complex multiplication, so might pretty it up, great, but it won't run
-*   much faster overall.
-*
-****************************************************************************
-*
+**************************************************************************** 
+* Copyright (c) 2012, Aaron Haviland
 * Copyright (c) 2010-2012, Andrew Thall, Alma College
 * All rights reserved.
 *
@@ -47,6 +29,26 @@
 * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 *
 ******************************************************************************
+*
+* A. Thall & A. Hegedus
+* Alma College
+* 9/1/2010
+*
+* Implementing the IBDWT method of Crandall in CUDA.
+*   This uses a variable base representation and a weighted tranformation
+* to reduce the FFT length and eliminate the modular reduction mod M_p.
+*
+* gpuLucas uses carry-save arithmetic to eliminate carry-adds beyond a single
+*   ripple-carry from each digit to the next, following the radix-restoration
+*   (dicing) of the convolution products.
+*
+* The radix-restoration code in IrrBaseBalanced.cu is an ugly kludge,
+*   slightly better with templating (thanks, Alex), but it makes up only 1/6th
+*   of the runtime, the rest being the weighted transform and componentwise
+*   complex multiplication, so might pretty it up, great, but it won't run
+*   much faster overall.
+*
+******************************************************************************
 * Tested:  GTX480 and Tesla C2050, Cuda versions 3.2, 4.0, 4.1
 * Compiled with Visual Studio 2008, x64.
 *   Uses 64-bit (int64_t) and will probably not work in 32-bit x86.
@@ -58,26 +60,10 @@
 *
 * Dependencies:
 *    CUFFT
-*    cutil library
 *    QD extended-precision library for dd_real, double-double class
 *        (Computed weights for IBDWT for non-power-of-two FFTs
 *         suffered catastrophic cancellation in double.)
 *         QD at http://crd-legacy.lbl.gov/~dhbailey/mpdist/
-*
-* FOR USE:
-*    AT COMPILE TIME:
-*       1) Set testPrime and signalSize in main()
-*                        
-*       2) Set setSliceAndDice(x) function in main() to carry high-order bits
-*          from x preceeding convolution product digits.  With convolution wordsize
-*          typically (18, 19) bits, two preceding terms are typically needed.
-*          For shorter wordsizes, a product may need product bits from up to six
-*          lower-order words.  setSliceAndDice() assigns a pointer-to-function
-*          to a templated function for the chosen number of terms.
-*
-*    All of this should be altered to be set automatically at runtime based on
-*    input testvalue. Most global compile-time dependencies have in fact been
-*    eliminated.
 *
 * Key routines:
 *    main() -- sets up the constants for the GPU
@@ -101,6 +87,7 @@
 *
 * NOTE:  must use extended precision to compute A and Ainv for non-power-of-two FFT runlengths
 *    We do this on the host using qd library.
+*    (Need double-double; gcc's long double is not precise enough.)
 *
 *  M42643801 took 208299.3 sec/57.86 hours/2.41 days
 *    It did 204.72 Lucas iterations per second = 4.88 msec per iteration
@@ -146,12 +133,8 @@
 *    Stripped timing code from mersenneTest()
 *
 * To do (xxAT: 2/19/2012):
-*    1) Need to select testPrime and signalSize variables at runtime
-*    2) Need to automatically set llintToBalInt<n>() to correct template at runtime
-*    2) Need SIGNAL_SIZE database for space/time trade-offs on CUDA ffts and rebalancing.
-*         Really need to auto-tune, since depends on GPU and memory constraints of cards.
-*    3) Timing code is a jumbled up mess.
-*    5) For a pipelined and double-checked system, need a lot more automagic routines
+*    1) Timing code is a jumbled up mess.
+*    2) For a pipelined and double-checked system, need a lot more automagic routines
 *         Also need to be able to save current run after X iterations for rechecking,
 *         save-and-restart on a multi-user, massively-multi-GPU system.
 */
@@ -301,6 +284,8 @@ static __global__ void invDWTproductMinus2(int64_t *llintArr, double *signal, do
  *   scale linearly with the length of the product, but by CLT tend toward a zero
  *   mean with a Gaussian distribution as n gets big.  Average case, but still get
  *   outliers and worst cases. 
+ * With convolution wordsize typically (18, 19) bits, two preceding terms are typically needed.
+ *   For shorter wordsizes, a product may need product bits from up to six lower-order words.
  * Use llintToIrrBal<2,3,4,5,6>, as appropriate.  And yes, we can have pointers
  *   to global kernels.  (Works fine, just address.)
  */
@@ -312,6 +297,7 @@ void (*sliceAndDice)(int *iArr, int *hiArr, int64_t *lliArr, unsigned char *bper
  *   These seem to be good divisions for the sliceAndDice but might need to be adjusted.
  * Auto-selected signalSize will almost always choose cases 17 through 19.
  */
+  
 void setSliceAndDice(int testPrime, int signalSize) {
 
 	int ratio = testPrime / signalSize;
@@ -598,8 +584,7 @@ int main(int argc, char* argv[]) {
  */
 
 // Complex pointwise multiplication
-static __global__ void ComplexPointwiseSqr(Complex* cval, int size)
-{
+static __global__ void ComplexPointwiseSqr(Complex* cval, int size) {
 	Complex c, temp;
 	const int tid = blockIdx.x*blockDim.x + threadIdx.x;
 	if (tid < size) {
@@ -645,7 +630,7 @@ static __host__ void computeBitsPerWord(int testPrime, int *bitsPerWord, int siz
  * Works backwards to get preceeding bits
  */
 static __host__ void computeBitsPerWordVectors(unsigned char *bitsPerWord8, int *bitsPerWord, int size) {
-	
+
 	for (int i = 0; i < size; i++) {
 		bitsPerWord8[i] = 0;
 
