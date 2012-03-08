@@ -180,7 +180,7 @@ int h_HI_MODMASK;
 int opt_quiet = 0;
 int opt_verbose = 0;
 char program_name[] = "gpuLucas";
-char program_version[] = "0.9.1";
+char program_version[] = "0.9.2";
 
 int resuming = 0;
 // checkpoint filename buffers
