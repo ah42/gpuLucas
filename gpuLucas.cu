@@ -940,7 +940,7 @@ restart_findSignalSize:
 			for (int five = 0; five <= MAX_5; five++) {
 				for (int seven = 0; seven <= MAX_7; seven++) {
 					signalSize = (powl(2,two) * powl(3,three) * powl(5,five) * powl(7,seven));
-					if ((signalSize < (unsigned int)max_nx+1) & (signalSize > (unsigned int)min_nx) & (signalSize % T_PER_B == 0)) {
+					if ((signalSize <= (unsigned int)max_nx) & (signalSize >= (unsigned int)min_nx) & (signalSize % T_PER_B == 0)) {
 						maxerr = 0;
 						int numBlocks = signalSize/T_PER_B;
 						setSliceAndDice(testPrime, signalSize);
