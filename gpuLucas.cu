@@ -166,7 +166,7 @@ const int T_PER_B = 512;
 #define MAX_7 8  // 5764801
 
 // This determines the maximum allowable roundoff error
-#define ERROR_LIMIT 0.40f
+#define ERROR_LIMIT 0.35f
 
 // At runtime, set constant and load to GPU for use in IrrBaseBalanced.cu code
 int h_LO_BITS;
