@@ -7,12 +7,12 @@ NVCC_ARCHES += -gencode arch=compute_20,code=compute_20 -gencode arch=compute_13
 #NVCC_ARCHES += -gencode arch=compute_20,code=sm_20 -gencode arch=compute_13,code=sm_13
 
 CFLAGS = -O3 -Wall
-NVCC_FLAGS =  -use_fast_math $(NVCC_ARCHES) --compiler-options="$(CFLAGS) -fno-strict-aliasing" --ptxas-options=-v --maxrregcount 20
+NVCC_FLAGS = -O3 -use_fast_math $(NVCC_ARCHES) --compiler-options="$(CFLAGS) -fno-strict-aliasing" --ptxas-options=-v --maxrregcount 20
 
 all: gpuLucas
 
 gpuLucas.o: gpuLucas.cu IrrBaseBalanced.cu
-	nvcc -c -o $@ gpuLucas.cu -O3 $(NVCC_FLAGS)
+	nvcc -c -o $@ gpuLucas.cu $(NVCC_FLAGS)
 
 gpuLucas: gpuLucas.o
 	g++ -fPIC $(CFLAGS) -o $@ $^  -Wl,-O1 -Wl,--as-needed -lcudart -lcufft -lqd

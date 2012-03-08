@@ -187,7 +187,8 @@ int resuming = 0;
 char checkpoint_file[32];
 char checkpoint_backup[32];
 // Default checkpoint interval in iterations:
-int checkpoint_freq = 10000;
+// 50,000 or higher eliminates most of the overhead cost in rebalanceIrrIntSEQGPU
+int checkpoint_freq = 50000;
 
 __constant__ int LO_BITS;
 __constant__ int HI_BITS;
@@ -340,6 +341,8 @@ void mersenneTest(unsigned int testPrime, unsigned int signalSize, Real *d_signa
 void writeCheckpoint(Real *signal, unsigned int testPrime, unsigned int signalSize, unsigned int iter);
 Real *readCheckpoint(unsigned int testPrime, unsigned int *signalSize, unsigned int *resume_iter);
 
+void printFriendlyTime(char *buf, int time);
+
 /**
  * print_help()
  */
@@ -450,7 +453,7 @@ int main(int argc, char* argv[]) {
 	fprintf(stderr, "Using device %d: %s\n\n", use_device, deviceProp.name);
 	cudaSetDevice(use_device);
 
-	unsigned int resume_iter;
+	unsigned int resume_iter = 0;
 
 	if ((cp_signal = readCheckpoint(testPrime, &signalSize, &resume_iter)) != NULL)
 		resuming = 1;
@@ -524,20 +527,23 @@ int main(int argc, char* argv[]) {
 	} else
 		printf("\nError trial completed successfully.\n");
 
+	char buf[16];
+	printFriendlyTime(buf, (elapsedMsecDEV*testPrime)/1000);
+
 	if (!opt_quiet) {
 		printf("\nTiming:  To test M%d"
-				"\n  elapsed time :      %10.f msec = %.1f sec"
-				"\n  dev. elapsed time:  %10.f msec = %.1f sec"
-				"\n  est. total time:    %10.f msec = %.1f sec\n",
+				"\n  elapsed time :      %10d msec = %.1f sec"
+				"\n  dev. elapsed time:  %10d msec = %d sec"
+				"\n  est. total time:    %10s\n",
 				testPrime,
-				elapsedMsec, elapsedMsec/1000,
-				elapsedMsecDEV*trialFraction, elapsedMsecDEV*trialFraction/1000,
-				elapsedMsecDEV*testPrime, elapsedMsecDEV*testPrime/1000);
+				(int)elapsedMsec, elapsedMsec/1000,
+				(int)(elapsedMsecDEV*trialFraction), (int)(elapsedMsecDEV*trialFraction/1000),
+				buf);
 
 		printf("\nBeginning full test of M%d\n\n", testPrime);
 	} else
-		printf("\n  est. total time:\t%10.f msec = %.1f sec\n\n",
-				elapsedMsecDEV*testPrime, elapsedMsecDEV*testPrime/1000);
+		printf("\n  est. total time:\t%10s\n\n",
+				buf);
 
 	if (resuming)
 		printf("\nResuming full test of M%d at iteration %d (%2.1f%%)\n\n", testPrime, resume_iter, 100.0f * (float)resume_iter / (float)testPrime);
@@ -1020,10 +1026,10 @@ float errorTrial(unsigned int testIterations, unsigned int testPrime, unsigned i
 	// We assume throughout that signalSize is divisible by T_PER_B
 	const int numBlocks = signalSize/T_PER_B;
 
-	// Run at least 50 testIterations. We'll encounter a floating point error later on if we don't
+	// Run at least 100 testIterations. We'll encounter a floating point error later on if we don't
 	// main() calls us with at least 100 iterations already, so this shouldn't happen
-	if (testIterations<50)
-		testIterations = 50;
+	if (testIterations<100)
+		testIterations = 100;
 
 	mallocArrays(signalSize, testPrime);
 
@@ -1059,7 +1065,7 @@ float errorTrial(unsigned int testIterations, unsigned int testPrime, unsigned i
 	float totalTime = 0;
 	// Loop testIterations times
 	for (unsigned int iter = 0; iter < testIterations; iter++) {
-		if (iter % (testIterations/50) == 0) {
+		if (iter % (testIterations/100) == 0) {
 			float perIterTime = mersenneIter<1, 1>(testPrime, signalSize, iter);
 
 			// If mersenneIter returned an error value, pass it along
@@ -1075,6 +1081,9 @@ float errorTrial(unsigned int testIterations, unsigned int testPrime, unsigned i
 		}
 	}
 	
+	// Average time per iteration
+	totalTime /= 100;
+
 	// DONE!  Final copy out from GPU, since not done by default as for CPU stages
 	// DO GOOD REBALANCE HERE
 	cudaEvent_t start, stop;
@@ -1083,7 +1092,9 @@ float errorTrial(unsigned int testIterations, unsigned int testPrime, unsigned i
 	cutilSafeCall(cudaEventRecord(start, 0));
 
 	addPseudoBalanced<<<numBlocks, T_PER_B>>>(i_signalOUT, i_hiBitArr, signalSize);
+	cutilCheckMsg("Kernel execution failed [ addPseudoBalanced ]");
 	rebalanceIrrIntSEQGPU<<<1, 1>>>(i_signalOUT, bitsPerWord8, signalSize);
+	cutilCheckMsg("Kernel execution failed [ rebalanceIrrIntSEQGPU ]");
 	cutilSafeCall(cudaMemcpy(h_signalOUT, i_signalOUT, sizeof(int)*signalSize, cudaMemcpyDeviceToHost));
 
 	cutilSafeCall(cudaEventRecord(stop, 0));
@@ -1091,13 +1102,16 @@ float errorTrial(unsigned int testIterations, unsigned int testPrime, unsigned i
 	float elapsedTime;
 	cutilSafeCall(cudaEventElapsedTime(&elapsedTime, start, stop));
 	if (opt_verbose)
-			printf("\nTime to rebalance and write-back:  %3.1f ms\n", elapsedTime);
+		printf("\nTime to rebalance and write-back:  %3.1f ms\n", elapsedTime);
+	// Add this to the total time, for checkpointing
+	if (!opt_quiet)
+		totalTime += elapsedTime/checkpoint_freq;
 	cutilSafeCall(cudaEventDestroy(start));
 	cutilSafeCall(cudaEventDestroy(stop));
 
 	freeArrays();
 
-	return totalTime/50;
+	return totalTime;
 }
 
 /**
@@ -1194,15 +1208,27 @@ void mersenneTest(unsigned int testPrime, unsigned int signalSize, Real *cp_sign
 		cutilCheckMsg("Kernel execution failed [ loadValue4ToFFTarray ]");
 	}
 
-	float maxerr = 0.0f;
+	// float maxerr = 0.0f;
+
+
+	int last_cp_iter = iter;
+
+	// Timers for displaying timing at checkpoint, and ETA to completion
+	// Only used if not quiet
+	cudaEvent_t cp_start, cp_stop;
+
+	cutilSafeCall(cudaEventCreate(&cp_start));
+	cutilSafeCall(cudaEventCreate(&cp_stop));
+	cutilSafeCall(cudaEventRecord(cp_start, 0));
+	cutilSafeCall(cudaEventSynchronize(cp_start));
 
 	// Loop M-2 times
 	for (; iter < testPrime; iter++) {
 		// Every so often, do some error checking. Do this at every checkpoint as well
 		if ((iter % (testPrime/1000) == 0) | (iter % checkpoint_freq == 1)) {
 			mersenneIter<1, 0>(testPrime, signalSize, iter);
-			maxerr = findMaxErrorHOST(dev_errArr, host_errArr, signalSize);
-			// FIXME: -Aaron: we need to add a way to stop/restart if the error is too high.
+			// maxerr = findMaxErrorHOST(dev_errArr, host_errArr, signalSize);
+			// FIXME: -Aaron: we should add a way to stop/restart if the error is too high.
 		} else {
 			mersenneIter<0, 0>(testPrime, signalSize, iter);
 		}
@@ -1211,22 +1237,54 @@ void mersenneTest(unsigned int testPrime, unsigned int signalSize, Real *cp_sign
 		// To match CUDALucas output: CL counts iterations differently and thus displays residue at what we consider to be iteration+1
 		if (iter % checkpoint_freq == 1) {
 			// This sync shouldn't be necessary, but it's best to be safe when writing a checkpoint
+			// Timing cost of memcpy and writing the checkpoint is negligible < .01ms
 			cutilDeviceSynchronize();
 			cutilSafeCall(cudaMemcpy(cp_signal, d_signal, sizeof(Real) * signalSize, cudaMemcpyDeviceToHost));
 			writeCheckpoint(cp_signal, testPrime, signalSize, iter + 1);
 
 			if (!opt_quiet) {
+				cutilSafeCall(cudaEventRecord(cp_stop, 0));
+				cutilSafeCall(cudaEventSynchronize(cp_stop));
+
+				// Get the the total elapsed time in ms since last checkpoint
+				float elapsedMsec;
+				cutilSafeCall(cudaEventElapsedTime(&elapsedMsec, cp_start, cp_stop));
+				float iter_time = elapsedMsec / (iter - last_cp_iter);
+
+				// calculate ETA in seconds
+				int eta_diff = iter_time * (testPrime - iter) / 1000; // eta in seconds
+
+				// Reset timer
+				last_cp_iter = iter;
+				cutilSafeCall(cudaEventRecord(cp_start, 0)); 
+				cutilSafeCall(cudaEventSynchronize(cp_start));
+
 				// Display current iteration's residue and error
 				addPseudoBalanced<<<numBlocks, T_PER_B>>>(i_signalOUT, i_hiBitArr, signalSize);
+				// FIXME: Timing cost of the rebalance is expensive > .5 seconds per call for 26xxxxxx exponent
 				rebalanceIrrIntSEQGPU<<<1, 1>>>(i_signalOUT, bitsPerWord8, signalSize);
 				cutilSafeCall(cudaMemcpy(h_signalOUT, i_signalOUT, sizeof(int)*signalSize, cudaMemcpyDeviceToHost));
+
+				// buf needs to fit formatted eta_time
+				char buf[64];
+				// Every 20 lines, print out extra information. Standard console is 24 lines
+				if (iter % (checkpoint_freq * 20) == 1) {
+					time_t eta_time = eta_diff + time(NULL);	// eta relative to 'now'
+					strftime(buf, 64, "%A %c", localtime(&eta_time));
+					printf("%s v%s: testing %d (n = %d)\nEstimated completion: %s\n", program_name, program_version, testPrime, signalSize, buf);
+				}
+
+				printFriendlyTime(buf, eta_diff);
 				// Lie about the current iteration to match other programs
-				printf("[%4.1f%%] Iteration %d: max err = %1.4f, ", 100.0f * (float)iter / (float)testPrime, iter - 1, maxerr);
+				printf("[%4.1f%%] Iter %d: %01.2f ms/iter, ETA %s, ", 100.0f * (float)iter / (float)testPrime, iter - 1, iter_time, buf);
 				print_residue(testPrime, h_signalOUT, signalSize);
 				printf("\n");
 			}
 		}
 	}
+
+	cutilSafeCall(cudaEventDestroy(cp_stop));
+	cutilSafeCall(cudaEventDestroy(cp_start));
 
 	// DONE!  Final copy out from GPU, since not done by default as for CPU stages
 	// DO GOOD REBALANCE HERE
@@ -1270,8 +1328,24 @@ void mersenneTest(unsigned int testPrime, unsigned int signalSize, Real *cp_sign
 	}
 	printf(", n = %d, %s v%s\n", signalSize, program_name, program_version);
 
-
 	freeArrays();
+	return;
+}
+
+void printFriendlyTime(char *buf, int time) {
+	int length = 0;
+	if (time >= 86400) {
+		// print days
+		length = sprintf(buf, "%dd ", time/86400);
+	}    
+	
+	if (time >= 3600) {
+		// print hours
+		length += sprintf(buf + length, "%02d:", (time%86400)/3600);
+	}    
+	
+	// print minutes:seconds
+	sprintf(buf + length, "%02d:%02d", (time%3600)/60, time%60);
 }
 
 Real *readCheckpoint(unsigned int testPrime, unsigned int *signalSize, unsigned int *resume_iter) {

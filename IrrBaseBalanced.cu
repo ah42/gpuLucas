@@ -162,6 +162,7 @@ static __global__ void addPseudoBalanced(int *signal, int *hiAdd, int size) {
  *   add-with-carry with rebalancedIrrIntSEQGPU<<<1, 1>>> call.  Could as easily be
  *   done CPU-side.
  */
+// FIXME: -aaron: This is very slow, and costs .5 seconds on each call (every checkpoint)
 static __global__ void rebalanceIrrIntSEQGPU(int *signal, unsigned char *bpwArr, int size) {
 
 	int carryOut = 0;
