@@ -204,11 +204,6 @@ __constant__ int HI_MODMASK;
 // This includes all code for parallel carry-add of the balanced-variable base integers
 #include "IrrBaseBalanced.cu"
 
-// NOTE:  The largest block size ensures a minimum number of redundant double2llint() functions
-//   are called (six extra per block to round product terms and place them in shared memory for
-//   "dicing" into individual, variable length words.
-//const int NUM_BLOCKS = SIGNAL_SIZE/T_PER_B;  // assume all divisible by T_PER_B
-
 static __host__ void initConstantSymbols(int testPrime, int signalSize) {
 
 	h_LO_BITS = testPrime/signalSize;
@@ -232,6 +227,17 @@ typedef cufftDoubleReal Real;
 #define CUFFT_TYPEINVERSE CUFFT_Z2D
 #define CUFFT_EXECFORWARD cufftExecD2Z
 #define CUFFT_EXECINVERSE cufftExecZ2D
+
+// Global pointers
+static int     *i_signalOUT, *h_signalOUT, *h_bitsPerWord, *i_hiBitArr;
+static Real    *d_signal, *dev_A, *dev_Ainv, *cp_signal;
+static Complex *z_signal;
+static unsigned char *bitsPerWord8, *h_bitsPerWord8;
+static int64_t *llint_signal;
+static double  *h_A, *h_Ainv;
+static float   *dev_errArr, *host_errArr;
+
+static cufftHandle plan1, plan2;
 
 /**
  * PREDECLARED FUNCTIONS:  these don't really need to be predeclared anymore,
@@ -445,8 +451,8 @@ int main(int argc, char* argv[]) {
 	cudaSetDevice(use_device);
 
 	unsigned int resume_iter;
-	Real *resume_signal;
-	if ((resume_signal = readCheckpoint(testPrime, &signalSize, &resume_iter)) != NULL)
+
+	if ((cp_signal = readCheckpoint(testPrime, &signalSize, &resume_iter)) != NULL)
 		resuming = 1;
 
 	if (signalSize == 0)  {
@@ -475,17 +481,6 @@ int main(int argc, char* argv[]) {
 	if (!opt_quiet)
 		printf("\n\tNUM_BLOCKS = %d, T_PER_B = %d\n", signalSize/T_PER_B, T_PER_B);
 
-	// START timer now
-	cudaEvent_t errorTrial_start, errorTrial_stop, mersenneTest_start, mersenneTest_stop;
-	cutilSafeCall(cudaEventCreate(&errorTrial_start));
-	cutilSafeCall(cudaEventCreate(&errorTrial_stop));
-	cutilSafeCall(cudaEventRecord(errorTrial_start, 0)); 
-
-	
-	// errorTrial() called to give an estimate of convolution sizes and errors,
-	//  as well as FFT timings and rebalancing time.
-	// return value is average time per Lucas-Lehmer iteration based on
-	//   GPU timings
 	int testIterations, trialFraction;
 	if (!resuming) {
 		trialFraction = 10000;
@@ -502,18 +497,25 @@ int main(int argc, char* argv[]) {
 	if (!opt_quiet)
 		printf("\nRunning %d iterations in an error trial test before %s full test...\n",
 				testIterations, resuming == 1 ? "resuming" : "beginning");
+
+	// START timer now
+	cudaEvent_t start, stop;
+	cutilSafeCall(cudaEventCreate(&start));
+	cutilSafeCall(cudaEventCreate(&stop));
+	cutilSafeCall(cudaEventRecord(start, 0));
+
+	// errorTrial() called to give an estimate of convolution sizes and errors,
+	// as well as FFT timings and rebalancing time.
+	// Return value is average time per Lucas-Lehmer iteration based on GPU timings
 	float elapsedMsecDEV = errorTrial(testIterations, testPrime, signalSize);
 
 	// stop the timer
-	cutilSafeCall(cudaEventRecord(errorTrial_stop, 0));
-	cutilSafeCall(cudaEventSynchronize(errorTrial_stop));
+	cutilSafeCall(cudaEventRecord(stop, 0));
+	cutilSafeCall(cudaEventSynchronize(stop));
 
 	//get the the total elapsed time in ms. negative value returned on abort condition
 	float elapsedMsec;
-	cutilSafeCall(cudaEventElapsedTime(&elapsedMsec, errorTrial_start, errorTrial_stop));
-
-	cutilSafeCall(cudaEventDestroy(errorTrial_start));
-	cutilSafeCall(cudaEventDestroy(errorTrial_stop));
+	cutilSafeCall(cudaEventElapsedTime(&elapsedMsec, start, stop));
 
 	if (elapsedMsecDEV < 0.0f) {
 			printf ("Encountered an error in the errorTrial test. Aborting\n");
@@ -539,32 +541,28 @@ int main(int argc, char* argv[]) {
 
 	if (resuming)
 		printf("\nResuming full test of M%d at iteration %d (%2.1f%%)\n\n", testPrime, resume_iter, 100.0f * (float)resume_iter / (float)testPrime);
-	cutilSafeCall(cudaEventCreate(&mersenneTest_start));
-	cutilSafeCall(cudaEventCreate(&mersenneTest_stop));
-	cutilSafeCall(cudaEventRecord(mersenneTest_start, 0));
+	cutilSafeCall(cudaEventCreate(&start));
+	cutilSafeCall(cudaEventCreate(&stop));
+	cutilSafeCall(cudaEventRecord(start, 0));
 
+	// If we're not resuming, this isn't malloc'd yet.
+	if (cp_signal == NULL)
+		cp_signal = (Real *) malloc(sizeof(Real)*signalSize);
 
-	// Define this outside the test so we have somewhere to copy resume data to, and free up host memory
-	Real *d_signal;
-	cutilSafeCall(cudaMalloc((void**)&d_signal, sizeof(Real) * signalSize));
+	mersenneTest(testPrime, signalSize, cp_signal, resume_iter);
 
-	if (resuming) {
-		cutilSafeCall(cudaMemcpy(d_signal, resume_signal, sizeof(Real) * signalSize, cudaMemcpyHostToDevice));
-		free(resume_signal);
-	}
-
-	mersenneTest(testPrime, signalSize, d_signal, resume_iter);
-
-	cutilSafeCall(cudaFree(d_signal));
+	// This isn't free'd by freeArrays();
+	if (cp_signal != NULL)
+		free(cp_signal);
 
 	//get the the total elapsed time in ms
-	cutilSafeCall(cudaEventRecord(mersenneTest_stop, 0));
-	cutilSafeCall(cudaEventSynchronize(mersenneTest_stop));
+	cutilSafeCall(cudaEventRecord(stop, 0));
+	cutilSafeCall(cudaEventSynchronize(stop));
 
-    cutilSafeCall(cudaEventElapsedTime(&elapsedMsec, mersenneTest_start, mersenneTest_stop));
+    cutilSafeCall(cudaEventElapsedTime(&elapsedMsec, start, stop));
 	
-	cutilSafeCall(cudaEventDestroy(mersenneTest_start));
-	cutilSafeCall(cudaEventDestroy(mersenneTest_stop));
+	cutilSafeCall(cudaEventDestroy(start));
+	cutilSafeCall(cudaEventDestroy(stop));
 
 	// Remove checkpoint files	
 	(void) unlink (checkpoint_file);
@@ -722,6 +720,193 @@ static __global__ void computeMaxBitVector(float *dev_errArr, int64_t *llint_sig
 	}
 }
 
+
+/**
+ * mersenneIter()
+ * Run a single iteration of the test
+ * Called from mersenneTest, errorTrial, and findSignalSize
+ */
+
+template <int check_error, int timing>
+static inline float mersenneIter(unsigned int testPrime, unsigned int signalSize, int iter) {
+	// We assume throughout that signalSize is divisible by T_PER_B
+	const int numBlocks = signalSize/T_PER_B;
+	const int numFFTblocks = (signalSize/2 + 1)/T_PER_B + 1; 
+	cudaEvent_t start, stop;
+	float elapsedTime, totalTime=0;
+
+	if (timing) {
+		cutilSafeCall(cudaEventCreate(&start));
+		cutilSafeCall(cudaEventCreate(&stop));
+		cutilSafeCall(cudaEventRecord(start, 0));
+	}
+
+	// Transform signal
+	cufftSafeCall(CUFFT_EXECFORWARD(plan1, d_signal, z_signal));
+	cutilCheckMsg("Kernel execution failed [ CUFFT_EXECFORWARD ]");
+	
+	// Multiply the coefficients componentwise
+	ComplexPointwiseSqr<<<numFFTblocks, T_PER_B>>>(z_signal, signalSize/2 + 1);
+	cutilCheckMsg("Kernel execution failed [ ComplexPointwiseSqr ]");
+	
+	// Transform signal back
+	cufftSafeCall(CUFFT_EXECINVERSE(plan2, z_signal, d_signal));
+	cutilCheckMsg("Kernel execution failed [ CUFFT_EXECINVERSE ]");
+	
+	if (timing) {
+		cutilSafeCall(cudaEventRecord(stop, 0));
+		cutilSafeCall(cudaEventSynchronize(stop));
+		cutilSafeCall(cudaEventElapsedTime(&elapsedTime, start, stop));
+		if (opt_verbose)
+			printf("Time for FFT, squaring, INV FFT:  %3.3f ms\n", elapsedTime);
+		totalTime += elapsedTime;
+	}
+
+	// Every so often, we do some error checking.
+	if (check_error) {
+		invDWTproductMinus2<1><<<numBlocks, T_PER_B>>>(llint_signal, d_signal, dev_Ainv, dev_errArr, signalSize);
+		// do error calculation in the function that calls us, since we don't need to touch dev_errArr any more in this function
+		// error = findMaxErrorHOST(dev_errArr, host_errArr, signalSize);
+	} else {
+		invDWTproductMinus2<0><<<numBlocks, T_PER_B>>>(llint_signal, d_signal, dev_Ainv, dev_errArr, signalSize);
+	}
+
+	cutilCheckMsg("Kernel execution failed [ invDWTproductMinus2 ]");
+
+
+	if (timing) {
+		float maxerr = findMaxErrorHOST(dev_errArr, host_errArr, signalSize);
+		if (maxerr >= 0.5f) {
+			if (opt_verbose)
+				printf("max abs error = %f, is too high. Exiting\n", maxerr);
+			return -1;
+		} else if (opt_verbose)
+			printf("\n[%d/50]: iteration %d: max abs error = %f", iter/(testPrime/50), iter, maxerr);
+		
+		computeMaxBitVector<<<numBlocks, T_PER_B>>>(dev_errArr, llint_signal, signalSize);
+		cutilCheckMsg("Kernel execution failed [ computeMaxBitVector ]");
+		float maxBitVector = findMaxErrorHOST(dev_errArr, host_errArr, signalSize);
+		if (opt_verbose) {
+			printf("\n[%d/50]: iteration %d: max Bit Vector = %f", iter/(testPrime/50), iter, maxBitVector);
+			fflush(stdout);
+		}
+
+		// Time rebalancing
+		cutilSafeCall(cudaEventRecord(start, 0));
+	}
+
+	// REBALANCE llint TIMING
+	sliceAndDice<<<numBlocks, T_PER_B>>>(i_signalOUT, i_hiBitArr, llint_signal, bitsPerWord8, signalSize);
+	cutilCheckMsg("Kernel execution failed [ sliceAndDice ]");
+
+	loadIntToDoubleIBDWT<<<numBlocks, T_PER_B>>>(d_signal, i_signalOUT, i_hiBitArr, dev_A, signalSize);
+	cutilCheckMsg("Kernel execution failed [ loadIntToDoubleIBDWT ]");
+
+	if (timing) {
+		cutilSafeCall(cudaEventRecord(stop, 0));
+		cutilSafeCall(cudaEventSynchronize(stop));
+		cutilSafeCall(cudaEventElapsedTime(&elapsedTime, start, stop));
+		if (opt_verbose)
+			printf("\nTime to rebalance llint:  %3.3f ms\n", elapsedTime);
+		totalTime += elapsedTime;
+		cutilSafeCall(cudaEventDestroy(start));
+		cutilSafeCall(cudaEventDestroy(stop));
+		return totalTime;
+	} else
+		return 0;
+}
+
+/**
+ * mallocArrays()
+ * cudaMalloc the GPU arrays
+ */
+int mallocArrays(int signalSize, int testPrime) {
+	// Allocate device memory for signal
+	int i_sizeOUT = sizeof(int)*signalSize;
+	int d_size = sizeof(Real)*signalSize;
+	int z_size = sizeof(Complex)*(signalSize/2 + 1);
+	int bpw_size = sizeof(unsigned char)*signalSize;
+	int llintSignalSize = sizeof(int64_t)*signalSize;
+	
+	cutilSafeCall(cudaMalloc((void**)&i_signalOUT, i_sizeOUT));
+	cutilSafeCall(cudaMalloc((void**)&d_signal, d_size));
+	cutilSafeCall(cudaMalloc((void**)&z_signal, z_size));
+	cutilSafeCall(cudaMalloc((void**)&dev_A, d_size));
+	cutilSafeCall(cudaMalloc((void**)&dev_Ainv, d_size));
+	cutilSafeCall(cudaMalloc((void**)&bitsPerWord8, bpw_size));
+	cutilSafeCall(cudaMalloc((void**)&llint_signal, llintSignalSize));
+	h_signalOUT = (int *) malloc(sizeof(int)*signalSize);
+
+	// Array for high-bit carry out
+	cutilSafeCall(cudaMalloc((void**)&i_hiBitArr, sizeof(int)*signalSize));
+
+	//make host and device arrays for error computation
+	cudaMalloc((void**) &dev_errArr, signalSize*sizeof(float));
+	host_errArr = (float *) malloc(signalSize*sizeof(float));
+
+	// CUFFT plan
+	cufftSafeCall(cufftPlan1d(&plan1, signalSize, CUFFT_TYPEFORWARD, 1));
+	cufftSafeCall(cufftPlan1d(&plan2, signalSize, CUFFT_TYPEINVERSE, 1));
+	
+
+	// Store computed bit values and bases for precomputation of masks
+	h_bitsPerWord = (int *) malloc(sizeof(int)*signalSize);
+	h_bitsPerWord8 = (unsigned char *) malloc(sizeof(unsigned char)*signalSize);
+
+	// Make sure all the cuda Arrays are cleared before we start working on them
+	cutilSafeCall(cudaMemset(i_signalOUT, 0, i_sizeOUT));
+	cutilSafeCall(cudaMemset(d_signal, 0, d_size));
+	cutilSafeCall(cudaMemset(z_signal, 0, z_size));
+	cutilSafeCall(cudaMemset(dev_A, 0, d_size));
+	cutilSafeCall(cudaMemset(dev_Ainv, 0, d_size));
+	cutilSafeCall(cudaMemset(bitsPerWord8, 0, bpw_size));
+	cutilSafeCall(cudaMemset(llint_signal, 0, llintSignalSize));
+	cutilSafeCall(cudaMemset(i_hiBitArr, 0, sizeof(int)*signalSize));
+	cutilSafeCall(cudaMemset(dev_errArr, 0, signalSize*sizeof(float)));
+
+	// Compute word-sizes to use when dicing products to sum to int array
+	computeBitsPerWord(testPrime, h_bitsPerWord, signalSize);
+	computeBitsPerWordVectors(h_bitsPerWord8, h_bitsPerWord, signalSize);
+	cutilSafeCall(cudaMemcpy(bitsPerWord8, h_bitsPerWord8, bpw_size, cudaMemcpyHostToDevice));
+
+	h_A = (double *) malloc(signalSize*sizeof(double));
+	h_Ainv = (double *) malloc(signalSize*sizeof(double));
+	
+	// compute weights in extended precision, essential for non-power-of-two signal_size
+	computeWeightVectors(h_A, h_Ainv, testPrime, signalSize);
+	cutilSafeCall(cudaMemcpy(dev_A, h_A, sizeof(double)*signalSize, cudaMemcpyHostToDevice));
+	cutilSafeCall(cudaMemcpy(dev_Ainv, h_Ainv, sizeof(double)*signalSize, cudaMemcpyHostToDevice));
+
+	return 1;
+}
+
+void freeArrays() {
+	//Destroy CUFFT context
+	cufftSafeCall(cufftDestroy(plan1));
+	cufftSafeCall(cufftDestroy(plan2));
+
+	// cleanup memory
+	free(h_signalOUT);
+	free(h_bitsPerWord);
+	free(h_bitsPerWord8);
+	free(h_A);
+	free(h_Ainv);
+	free(host_errArr);
+	
+	cutilSafeCall(cudaFree(i_signalOUT));
+	cutilSafeCall(cudaFree(d_signal));
+	cutilSafeCall(cudaFree(z_signal));
+
+	cutilSafeCall(cudaFree(dev_A));
+	cutilSafeCall(cudaFree(dev_Ainv));
+	cutilSafeCall(cudaFree(bitsPerWord8));
+	cutilSafeCall(cudaFree(llint_signal));
+	
+	cutilSafeCall(cudaFree(i_hiBitArr));
+
+	cutilSafeCall(cudaFree(dev_errArr));
+}
+
 /**
  * findSignalSize()
  * Determines the best signalSize to use for a given testPrime
@@ -755,127 +940,37 @@ restart_findSignalSize:
 			for (int five = 0; five <= MAX_5; five++) {
 				for (int seven = 0; seven <= MAX_7; seven++) {
 					signalSize = (powl(2,two) * powl(3,three) * powl(5,five) * powl(7,seven));
-					if ((signalSize < (unsigned int)max_nx) & (signalSize > (unsigned int)min_nx) & (signalSize % T_PER_B == 0)) {
+					if ((signalSize < (unsigned int)max_nx+1) & (signalSize > (unsigned int)min_nx) & (signalSize % T_PER_B == 0)) {
 						maxerr = 0;
 						int numBlocks = signalSize/T_PER_B;
 						setSliceAndDice(testPrime, signalSize);
 						initConstantSymbols(testPrime, signalSize);
  
- 						// Store computed bit values and bases for precomputation of masks for the 
-						int *h_bitsPerWord = (int *) malloc(sizeof(int)*signalSize);
-						unsigned char *h_bitsPerWord8 = (unsigned char *) malloc(sizeof(unsigned char)*signalSize);
-						
-						// Allocate device memory for signal
-						int *i_signalOUT;
-						Real *d_signal;
-						Complex *z_signal;
-						int i_sizeOUT = sizeof(int)*signalSize;
-						int d_size = sizeof(Real)*signalSize;
-						int z_size = sizeof(Complex)*(signalSize/2 + 1);
-						int bpw_size = sizeof(unsigned char)*signalSize;
-						int llintSignalSize = sizeof(int64_t)*signalSize;
-						Real *dev_A, *dev_Ainv;
-						unsigned char *bitsPerWord8;
-						int64_t *llint_signal;
-						cutilSafeCall(cudaMalloc((void**)&i_signalOUT, i_sizeOUT));
-						cutilSafeCall(cudaMalloc((void**)&d_signal, d_size));
-						cutilSafeCall(cudaMalloc((void**)&z_signal, z_size));
-						cutilSafeCall(cudaMalloc((void**)&dev_A, d_size));
-						cutilSafeCall(cudaMalloc((void**)&dev_Ainv, d_size));
-						cutilSafeCall(cudaMalloc((void**)&bitsPerWord8, bpw_size));
-						cutilSafeCall(cudaMalloc((void**)&llint_signal, llintSignalSize));
-						
-						cufftHandle plan1, plan2;
-						cufftSafeCall(cufftPlan1d(&plan1, signalSize, CUFFT_TYPEFORWARD, 1));
-						cufftSafeCall(cufftPlan1d(&plan2, signalSize, CUFFT_TYPEINVERSE, 1));
-						
-						// Variables for the GPK carry-adder
-						// Array for high-bit carry out
-						int *i_hiBitArr;
-						cutilSafeCall(cudaMalloc((void**)&i_hiBitArr, sizeof(int)*signalSize));
-						
-						//make host and device arrays for error computation
-						float *dev_errArr;
-						cudaMalloc((void**) &dev_errArr, signalSize*sizeof(float));
-						float *host_errArr = (float *) malloc(signalSize*sizeof(float));
-						
-						// Compute word-sizes to use when dicing products to sum to int array
-						computeBitsPerWord(testPrime, h_bitsPerWord, signalSize);
-						computeBitsPerWordVectors(h_bitsPerWord8, h_bitsPerWord, signalSize);
-						cutilSafeCall(cudaMemcpy(bitsPerWord8, h_bitsPerWord8, bpw_size, cudaMemcpyHostToDevice));
+						mallocArrays(signalSize, testPrime);
 
-						double *h_A = (double *) malloc(signalSize*sizeof(double));
-						double *h_Ainv = (double *) malloc(signalSize*sizeof(double));
-						
-						// compute weights in extended precision, essential for non-power-of-two signal_size
-						computeWeightVectors(h_A, h_Ainv, testPrime, signalSize);
-						cutilSafeCall(cudaMemcpy(dev_A, h_A, sizeof(double)*signalSize, cudaMemcpyHostToDevice));
-						cutilSafeCall(cudaMemcpy(dev_Ainv, h_Ainv, sizeof(double)*signalSize, cudaMemcpyHostToDevice));
-						
 						// load the int array to the doubles for FFT
 						// This is already balanced, and already multiplied by a_0 = 1 for DWT
 						loadValue4ToFFTarray<<<numBlocks, T_PER_B>>>(d_signal, signalSize);
 						cutilCheckMsg("Kernel execution failed [ loadValue4ToFFTarray ]");
-						
-						int numFFTblocks = (signalSize/2 + 1)/T_PER_B + 1;
 					
-						int iter = 2;
+						int iter = 0;
 						// start timer
 						cutilSafeCall(cudaEventRecord(start_findSignalSize, 0));
 						for (; iter < testIterations; iter++) {
-							// Transform signal
-							cufftSafeCall(CUFFT_EXECFORWARD(plan1, (Real *)d_signal, (Complex *)z_signal));
-							cutilCheckMsg("Kernel execution failed [ CUFFT_EXECFORWARD ]");
+							mersenneIter<1, 0>(testPrime, signalSize, iter);
 
-							// Multiply the coefficients componentwise
-							ComplexPointwiseSqr<<<numFFTblocks, T_PER_B>>>(z_signal, signalSize/2 + 1);
-							cutilCheckMsg("Kernel execution failed [ ComplexPointwiseSqr ]");
-							
-							// Transform signal back
-							cufftSafeCall(CUFFT_EXECINVERSE(plan2, (Complex *)z_signal, (Real *)d_signal));
-							cutilCheckMsg("Kernel execution failed [ CUFFT_EXECINVERSE ]");
-
-							// Calculate error
-							invDWTproductMinus2<1><<<numBlocks, T_PER_B>>>(llint_signal, d_signal, dev_Ainv, dev_errArr, signalSize);
-							cutilCheckMsg("Kernel execution failed [ ivnDWTproductMinus2ERROR ]");
-							
 							float this_err = findMaxErrorHOST(dev_errArr, host_errArr, signalSize);
 							maxerr = std::max(this_err, maxerr);
-							
+
 							if (maxerr >= ERROR_LIMIT) // no need to continue this test
 								break;
-
-							sliceAndDice<<<numBlocks, T_PER_B>>>(i_signalOUT, i_hiBitArr, llint_signal, bitsPerWord8, signalSize);
-							cutilCheckMsg("Kernel execution failed [ sliceAndDice ]");
-							
-							loadIntToDoubleIBDWT<<<numBlocks, T_PER_B>>>(d_signal, i_signalOUT, i_hiBitArr, dev_A, signalSize);
-							cutilCheckMsg("Kernel execution failed [ loadIntToDoubleIBDWT ]");
 						}
 
 						cutilSafeCall(cudaEventRecord(stop_findSignalSize, 0));
 						cutilSafeCall(cudaEventSynchronize(stop_findSignalSize));
 						cutilSafeCall(cudaEventElapsedTime(&elapsedTime, start_findSignalSize, stop_findSignalSize));
-						
-						//Destroy CUFFT context
-						cufftSafeCall(cufftDestroy(plan1));
-						cufftSafeCall(cufftDestroy(plan2));
-						
-						// cleanup memory
-						free(h_bitsPerWord);
-						free(h_bitsPerWord8);
-						free(h_A);
-						free(h_Ainv);
-						free(host_errArr);
-						
-						cutilSafeCall(cudaFree(i_signalOUT));
-						cutilSafeCall(cudaFree(d_signal));
-						cutilSafeCall(cudaFree(z_signal));
-						cutilSafeCall(cudaFree(i_hiBitArr));
-						cutilSafeCall(cudaFree(dev_A));
-						cutilSafeCall(cudaFree(dev_Ainv));
-						cutilSafeCall(cudaFree(bitsPerWord8));
-						cutilSafeCall(cudaFree(llint_signal));
-						cutilSafeCall(cudaFree(dev_errArr));
+					
+						freeArrays();
 
 						if (!opt_quiet)
 							printf("Testing signalSize %d, time: %3.2fms, error: %1.4f", (int)signalSize, elapsedTime/iter, maxerr);
@@ -932,60 +1027,7 @@ float errorTrial(unsigned int testIterations, unsigned int testPrime, unsigned i
 	if (testIterations<50)
 		testIterations = 50;
 
-	// Allocate host memory to return signal as necessary
-	int *h_signalOUT = (int *) malloc(sizeof(int)*signalSize);
- 
-	// Store computed bit values and bases for precomputation of 
-	//    masks for the 
-	int *h_bases = (int *) malloc(sizeof(int)*signalSize);
-	int *h_bitsPerWord = (int *) malloc(sizeof(int)*signalSize);
-	unsigned char *h_bitsPerWord8 = (unsigned char *) malloc(sizeof(unsigned char)*signalSize);
-
-	// Allocate device memory for signal
-	int *i_signalOUT;
-	Real *d_signal;
-	Complex *z_signal;
-	int i_sizeOUT = sizeof(int)*signalSize;
-	int d_size = sizeof(Real)*signalSize;
-	int z_size = sizeof(Complex)*(signalSize/2 + 1);
-	int bpw_size = sizeof(unsigned char)*signalSize;
-
-	int llintSignalSize = sizeof(int64_t)*signalSize;
-
-	Real *dev_A, *dev_Ainv;
-	unsigned char *bitsPerWord8;
-	int64_t *llint_signal;
-	cutilSafeCall(cudaMalloc((void**)&i_signalOUT, i_sizeOUT));
-	cutilSafeCall(cudaMalloc((void**)&d_signal, d_size));
-	cutilSafeCall(cudaMalloc((void**)&z_signal, z_size));
-
-	cutilSafeCall(cudaMalloc((void**)&dev_A, d_size));
-	cutilSafeCall(cudaMalloc((void**)&dev_Ainv, d_size));
-	cutilSafeCall(cudaMalloc((void**)&bitsPerWord8, bpw_size));
-	cutilSafeCall(cudaMalloc((void**)&llint_signal, llintSignalSize));
-
-	// allocate device memory for DWT weights and base values
-	// CUFFT plan
-	cufftHandle plan1, plan2;
-	cufftSafeCall(cufftPlan1d(&plan1, signalSize, CUFFT_TYPEFORWARD, 1));
-	cufftSafeCall(cufftPlan1d(&plan2, signalSize, CUFFT_TYPEINVERSE, 1));
-
-	// Variables for the GPK carry-adder
-	// Array for high-bit carry out
-	int *i_hiBitArr;
-	cutilSafeCall(cudaMalloc((void**)&i_hiBitArr, sizeof(int)*signalSize));
-
-	// CUDPP plan for parallel-scan int GPK adds
-	
-	//make host and device arrays for error computation
-	float *dev_errArr;
-	cudaMalloc((void**) &dev_errArr, signalSize*sizeof(float));
-	float *host_errArr = (float *) malloc(signalSize*sizeof(float));
-
-	// Compute word-sizes to use when dicing products to sum to int array
-	computeBitsPerWord(testPrime, h_bitsPerWord, signalSize);
-	computeBitsPerWordVectors(h_bitsPerWord8, h_bitsPerWord, signalSize);
-	cutilSafeCall(cudaMemcpy(bitsPerWord8, h_bitsPerWord8, bpw_size, cudaMemcpyHostToDevice));
+	mallocArrays(signalSize, testPrime);
 
 	if (opt_verbose) {
 		for (int i = 0; i < 20; i++) {
@@ -995,6 +1037,7 @@ float errorTrial(unsigned int testIterations, unsigned int testPrime, unsigned i
 				printf("%d ", bit & h_bitsPerWord8[i] ? h_HI_BITS : h_LO_BITS);
 			printf("\n");
 		}
+
 		for (unsigned int i = signalSize - 8; i < signalSize; i++) {
 			printf("word[%d] numbits = %d\n", i, h_bitsPerWord[i]);
 			printf("numbits of this and following 7 are: ");
@@ -1002,17 +1045,8 @@ float errorTrial(unsigned int testIterations, unsigned int testPrime, unsigned i
 				printf("%d ", bit & h_bitsPerWord8[i] ? h_HI_BITS : h_LO_BITS);
 			printf("\n");
 		}
-	}
-	
-	double *h_A = (double *) malloc(signalSize*sizeof(double));
-	double *h_Ainv = (double *) malloc(signalSize*sizeof(double));
 
-	// compute weights in extended precision, essential for non-power-of-two signal_size
-	computeWeightVectors(h_A, h_Ainv, testPrime, signalSize);
-	cutilSafeCall(cudaMemcpy(dev_A, h_A, sizeof(double)*signalSize, cudaMemcpyHostToDevice));
-	cutilSafeCall(cudaMemcpy(dev_Ainv, h_Ainv, sizeof(double)*signalSize, cudaMemcpyHostToDevice));
-	if (opt_verbose) {
-		printf("weight vector looks like:\n");
+		printf("Weight vector looks like:\n");
 		for (int i = 0; i < 20; i++) 
 			printf("a[%d] = %f\n", i, h_A[i]);
 		for (int i = 0; i < 20; i++) 
@@ -1025,98 +1059,22 @@ float errorTrial(unsigned int testIterations, unsigned int testPrime, unsigned i
 	cutilCheckMsg("Kernel execution failed [ loadValue4ToFFTarray ]");
 
 	float totalTime = 0;
-	// Loop M-2 times
-    for (unsigned int iter = 2; iter < testIterations; iter++) {
+	// Loop testIterations times
+	for (unsigned int iter = 0; iter < testIterations; iter++) {
 		if (iter % (testIterations/50) == 0) {
+			float perIterTime = mersenneIter<1, 1>(testPrime, signalSize, iter);
 
-			cudaEvent_t start, stop;
-			cutilSafeCall(cudaEventCreate(&start));
-			cutilSafeCall(cudaEventCreate(&stop));
-			cutilSafeCall(cudaEventRecord(start, 0));
-
-			// Transform signal
-			cufftSafeCall(CUFFT_EXECFORWARD(plan1, (Real *)d_signal, (Complex *)z_signal));
-			cutilCheckMsg("Kernel execution failed [ CUFFT_EXECFORWARD ]");
-			// Multiply the coefficients componentwise
-			int numFFTblocks = (signalSize/2 + 1)/T_PER_B + 1;
-
-			ComplexPointwiseSqr<<<numFFTblocks, T_PER_B>>>(z_signal, signalSize/2 + 1);
-
-			cutilCheckMsg("Kernel execution failed [ ComplexPointwiseSqr ]");
-
-			// Transform signal back
-			cufftSafeCall(CUFFT_EXECINVERSE(plan2, (Complex *)z_signal, (Real *)d_signal));
-			cutilCheckMsg("Kernel execution failed [ CUFFT_EXECINVERSE ]");
-
-			cutilSafeCall(cudaEventRecord(stop, 0));
-			cutilSafeCall(cudaEventSynchronize(stop));
-			float elapsedTime;
-			cutilSafeCall(cudaEventElapsedTime(&elapsedTime, start, stop));
-			if (opt_verbose)
-					printf("Time for FFT, squaring, INV FFT:  %3.3f ms\n", elapsedTime);
-			totalTime += elapsedTime;
-			cutilSafeCall(cudaEventDestroy(start));
-			cutilSafeCall(cudaEventDestroy(stop));
-
-			// ERROR TESTS
-			invDWTproductMinus2<1><<<numBlocks, T_PER_B>>>(llint_signal, d_signal, dev_Ainv, dev_errArr, signalSize);
-			cutilCheckMsg("Kernel execution failed [ ivnDWTproductMinus2ERROR ]");
-
-			float maxerr = findMaxErrorHOST(dev_errArr, host_errArr, signalSize);
-			if (maxerr >= 0.5f) {
-					if (opt_verbose)
-						printf("max abs error = %f, is too high. Exiting\n", maxerr);
-					totalTime = -1;
-					break;
-			} else if (opt_verbose)
-					printf("\n[%d/50]: iteration %d: max abs error = %f", iter/(testPrime/50), iter, maxerr);
-
-			computeMaxBitVector<<<numBlocks, T_PER_B>>>(dev_errArr, llint_signal, signalSize);
-			cutilCheckMsg("Kernel execution failed [ computeMaxBitVector ]");
-			float maxBitVector = findMaxErrorHOST(dev_errArr, host_errArr, signalSize);
-			if (opt_verbose) {
-					printf("\n[%d/50]: iteration %d: max Bit Vector = %f", iter/(testPrime/50), iter, maxBitVector);
-					fflush(stdout);
+			// If mersenneIter returned an error value, pass it along
+			if (perIterTime < 0) {
+				totalTime = -1;
+				break;
 			}
 
-			// Time rebalancing
-			cutilSafeCall(cudaEventCreate(&start));
-			cutilSafeCall(cudaEventCreate(&stop));
-			cutilSafeCall(cudaEventRecord(start, 0));
-			sliceAndDice<<<numBlocks, T_PER_B>>>(i_signalOUT, i_hiBitArr, llint_signal, bitsPerWord8, signalSize);
-			cutilCheckMsg("Kernel execution failed [ sliceAndDice ]");
-			cutilSafeCall(cudaEventRecord(stop, 0));
-			cutilSafeCall(cudaEventSynchronize(stop));
-			cutilSafeCall(cudaEventElapsedTime(&elapsedTime, start, stop));
-			if (opt_verbose)
-					printf("\nTime to rebalance llint:  %3.3f ms\n", elapsedTime);
-			totalTime += elapsedTime;
-			cutilSafeCall(cudaEventDestroy(start));
-			cutilSafeCall(cudaEventDestroy(stop));
+			totalTime += perIterTime;
 		}
 		else {
-			// Transform signal
-			cufftSafeCall(CUFFT_EXECFORWARD(plan1, (Real *)d_signal, (Complex *)z_signal));
-			cutilCheckMsg("Kernel execution failed [ CUFFT_EXECFORWARD ]");
-			// Multiply the coefficients componentwise
-			int numFFTblocks = (signalSize/2 + 1)/T_PER_B + 1;
-
-			ComplexPointwiseSqr<<<numFFTblocks, T_PER_B>>>(z_signal, signalSize/2 + 1);
-			cutilCheckMsg("Kernel execution failed [ ComplexPointwiseSqr ]");
-
-			// Transform signal back
-			cufftSafeCall(CUFFT_EXECINVERSE(plan2, (Complex *)z_signal, (Real *)d_signal));
-			cutilCheckMsg("Kernel execution failed [ CUFFT_EXECINVERSE ]");
-
-			invDWTproductMinus2<0><<<numBlocks, T_PER_B>>>(llint_signal, d_signal, dev_Ainv, dev_errArr, signalSize);
-			cutilCheckMsg("Kernel execution failed [ invDWTproductMinus2 ]");
-
-			sliceAndDice<<<numBlocks, T_PER_B>>>(i_signalOUT, i_hiBitArr, llint_signal, bitsPerWord8, signalSize);
-			cutilCheckMsg("Kernel execution failed [ sliceAndDice ]");
+			mersenneIter<0, 0>(testPrime, signalSize, iter);
 		}
-
-		loadIntToDoubleIBDWT<<<numBlocks, T_PER_B>>>(d_signal, i_signalOUT, i_hiBitArr, dev_A, signalSize);
-		cutilCheckMsg("Kernel execution failed [ loadIntToDoubleIBDWT ]");
 	}
 	
 	// DONE!  Final copy out from GPU, since not done by default as for CPU stages
@@ -1128,7 +1086,7 @@ float errorTrial(unsigned int testIterations, unsigned int testPrime, unsigned i
 
 	addPseudoBalanced<<<numBlocks, T_PER_B>>>(i_signalOUT, i_hiBitArr, signalSize);
 	rebalanceIrrIntSEQGPU<<<1, 1>>>(i_signalOUT, bitsPerWord8, signalSize);
-	cutilSafeCall(cudaMemcpy(h_signalOUT, i_signalOUT, i_sizeOUT, cudaMemcpyDeviceToHost));
+	cutilSafeCall(cudaMemcpy(h_signalOUT, i_signalOUT, sizeof(int)*signalSize, cudaMemcpyDeviceToHost));
 
 	cutilSafeCall(cudaEventRecord(stop, 0));
 	cutilSafeCall(cudaEventSynchronize(stop));
@@ -1139,31 +1097,8 @@ float errorTrial(unsigned int testIterations, unsigned int testPrime, unsigned i
 	cutilSafeCall(cudaEventDestroy(start));
 	cutilSafeCall(cudaEventDestroy(stop));
 
-	//Destroy CUFFT context
-	cufftSafeCall(cufftDestroy(plan1));
-	cufftSafeCall(cufftDestroy(plan2));
+	freeArrays();
 
-	// cleanup memory
-	free(h_signalOUT);
-	free(h_bases);
-	free(h_bitsPerWord);
-	free(h_bitsPerWord8);
-	free(h_A);
-	free(h_Ainv);
-	free(host_errArr);
-
-	cutilSafeCall(cudaFree(i_signalOUT));
-	cutilSafeCall(cudaFree(d_signal));
-	cutilSafeCall(cudaFree(z_signal));
-
-	cutilSafeCall(cudaFree(i_hiBitArr));
-	cutilSafeCall(cudaFree(dev_A));
-	cutilSafeCall(cudaFree(dev_Ainv));
-	cutilSafeCall(cudaFree(bitsPerWord8));
-	cutilSafeCall(cudaFree(llint_signal));
-
-	cutilSafeCall(cudaFree(dev_errArr));
-	
 	return totalTime/50;
 }
 
@@ -1241,73 +1176,16 @@ void print_residue(int testPrime, int *h_signalOUT, int signalSize) {
 * mersenneTest() -- full test of 2^testPrime - 1, including max error term every 1/50th
 *   time through loop
 */
-void mersenneTest(unsigned int testPrime, unsigned int signalSize, Real *d_signal, unsigned int iter) {
+void mersenneTest(unsigned int testPrime, unsigned int signalSize, Real *cp_signal, unsigned int iter) {
 
 	// We assume throughout that signalSize is divisible by T_PER_B
 	const int numBlocks = signalSize/T_PER_B;
-	const int numFFTblocks = (signalSize/2 + 1)/T_PER_B + 1;
-	
-	// Allocate host memory to return signal as necessary
-	int *h_signalOUT = (int *) malloc(sizeof(int)*signalSize);
-	// For Checkpointing
-	Real *cp_signalOUT = (Real *) malloc(sizeof(Real)*signalSize);
 
-	// Store computed bit values and bases for precomputation of 
-	//    masks for the 
-	int *h_bases = (int *) malloc(sizeof(int)*signalSize);
-	int *h_bitsPerWord = (int *) malloc(sizeof(int)*signalSize);
-	unsigned char *h_bitsPerWord8 = (unsigned char *) malloc(sizeof(unsigned char)*signalSize);
+	mallocArrays(signalSize, testPrime);
 
-	// Allocate device memory for signal
-	int *i_signalOUT;
-//	Real *d_signal;
-	Complex *z_signal;
-	int i_sizeOUT = sizeof(int)*signalSize;
-	int d_size = sizeof(Real)*signalSize;
-	int z_size = sizeof(Complex)*(signalSize/2 + 1);
-	int bpw_size = sizeof(unsigned char)*signalSize;
-
-	int llintSignalSize = sizeof(int64_t)*signalSize;
-
-	Real *dev_A, *dev_Ainv;
-	unsigned char *bitsPerWord8;
-	int64_t *llint_signal;
-	cutilSafeCall(cudaMalloc((void**)&i_signalOUT, i_sizeOUT));
-//	cutilSafeCall(cudaMalloc((void**)&d_signal, d_size));
-	cutilSafeCall(cudaMalloc((void**)&z_signal, z_size));
-
-	cutilSafeCall(cudaMalloc((void**)&dev_A, d_size));
-	cutilSafeCall(cudaMalloc((void**)&dev_Ainv, d_size));
-	cutilSafeCall(cudaMalloc((void**)&bitsPerWord8, bpw_size));
-	cutilSafeCall(cudaMalloc((void**)&llint_signal, llintSignalSize));
-
-	// allocate device memory for DWT weights and base values
-	// CUFFT plan
-	cufftHandle plan1, plan2;
-	cufftSafeCall(cufftPlan1d(&plan1, signalSize, CUFFT_TYPEFORWARD, 1));
-	cufftSafeCall(cufftPlan1d(&plan2, signalSize, CUFFT_TYPEINVERSE, 1));
-
-	// Array for high-bit carry out
-	int *i_hiBitArr;
-	cutilSafeCall(cudaMalloc((void**)&i_hiBitArr, sizeof(int)*signalSize));
-
-	// Error-checking device and host arrays
-	float *dev_errArr; 
-	cudaMalloc((void**) &dev_errArr, signalSize*sizeof(float));
-	float *host_errArr = (float *) malloc(signalSize*sizeof(float));
-
-	// Compute word-sizes to use when dicing products to sum to int array
-	computeBitsPerWord(testPrime, h_bitsPerWord, signalSize);
-	computeBitsPerWordVectors(h_bitsPerWord8, h_bitsPerWord, signalSize);
-	cutilSafeCall(cudaMemcpy(bitsPerWord8, h_bitsPerWord8, bpw_size, cudaMemcpyHostToDevice));
-
-	// compute weights in extended precision, essential for non-power-of-two signal_size,
-	//   and then load to device
-	double *h_A = (double *) malloc(signalSize*sizeof(double));
-	double *h_Ainv = (double *) malloc(signalSize*sizeof(double));
-	computeWeightVectors(h_A, h_Ainv, testPrime, signalSize);
-	cutilSafeCall(cudaMemcpy(dev_A, h_A, sizeof(double)*signalSize, cudaMemcpyHostToDevice));
-	cutilSafeCall(cudaMemcpy(dev_Ainv, h_Ainv, sizeof(double)*signalSize, cudaMemcpyHostToDevice));
+	if (resuming) {
+		cutilSafeCall(cudaMemcpy(d_signal, cp_signal, sizeof(Real) * signalSize, cudaMemcpyHostToDevice));
+	}    
 
 	if (!resuming) {
 		iter = 2;
@@ -1319,51 +1197,31 @@ void mersenneTest(unsigned int testPrime, unsigned int signalSize, Real *d_signa
 	}
 
 	float maxerr = 0.0f;
+
 	// Loop M-2 times
 	for (; iter < testPrime; iter++) {
-		// Transform signal
-		cufftSafeCall(CUFFT_EXECFORWARD(plan1, (Real *)d_signal, (Complex *)z_signal));
-		cutilCheckMsg("Kernel execution failed [ CUFFT_EXECFORWARD ]");
-
-		// Multiply the coefficients componentwise
-		ComplexPointwiseSqr<<<numFFTblocks, T_PER_B>>>(z_signal, signalSize/2 + 1);
-		cutilCheckMsg("Kernel execution failed [ ComplexPointwiseSqr ]");
-
-		// Transform signal back
-		cufftSafeCall(CUFFT_EXECINVERSE(plan2, (Complex *)z_signal, (Real *)d_signal));
-		cutilCheckMsg("Kernel execution failed [ CUFFT_EXECINVERSE ]");
-
 		// Every so often, do some error checking. Do this at every checkpoint as well
 		if ((iter % (testPrime/1000) == 0) | (iter % checkpoint_freq == 1)) {
-			invDWTproductMinus2<1><<<numBlocks, T_PER_B>>>(llint_signal, d_signal, dev_Ainv, dev_errArr, signalSize);
-			cutilCheckMsg("Kernel execution failed [ invDWTproductMinus2ERROR ]");
-
+			mersenneIter<1, 0>(testPrime, signalSize, iter);
 			maxerr = findMaxErrorHOST(dev_errArr, host_errArr, signalSize);
 			// FIXME: -Aaron: we need to add a way to stop/restart if the error is too high.
 		} else {
-			invDWTproductMinus2<0><<<numBlocks, T_PER_B>>>(llint_signal, d_signal, dev_Ainv, dev_errArr, signalSize);
-			cutilCheckMsg("Kernel execution failed [ invDWTproductMinus2 ]");
+			mersenneIter<0, 0>(testPrime, signalSize, iter);
 		}
-
-		// REBALANCE llint TIMING
-		sliceAndDice<<<numBlocks, T_PER_B>>>(i_signalOUT, i_hiBitArr, llint_signal, bitsPerWord8, signalSize);
-		cutilCheckMsg("Kernel execution failed [ sliceAndDice ]");
-
-		loadIntToDoubleIBDWT<<<numBlocks, T_PER_B>>>(d_signal, i_signalOUT, i_hiBitArr, dev_A, signalSize);
-		cutilCheckMsg("Kernel execution failed [ loadIntToDoubleIBDWT ]");
 
 		// Checkpoint every checkpoint_freq iterations
 		// To match CUDALucas output: CL counts iterations differently and thus displays residue at what we consider to be iteration+1
 		if (iter % checkpoint_freq == 1) {
+			// This sync shouldn't be necessary, but it's best to be safe when writing a checkpoint
 			cutilDeviceSynchronize();
-			cutilSafeCall(cudaMemcpy(cp_signalOUT, d_signal, sizeof(Real) * signalSize, cudaMemcpyDeviceToHost));
-			writeCheckpoint(cp_signalOUT, testPrime, signalSize, iter + 1);
+			cutilSafeCall(cudaMemcpy(cp_signal, d_signal, sizeof(Real) * signalSize, cudaMemcpyDeviceToHost));
+			writeCheckpoint(cp_signal, testPrime, signalSize, iter + 1);
 
 			if (!opt_quiet) {
 				// Display current iteration's residue and error
 				addPseudoBalanced<<<numBlocks, T_PER_B>>>(i_signalOUT, i_hiBitArr, signalSize);
 				rebalanceIrrIntSEQGPU<<<1, 1>>>(i_signalOUT, bitsPerWord8, signalSize);
-				cutilSafeCall(cudaMemcpy(h_signalOUT, i_signalOUT, i_sizeOUT, cudaMemcpyDeviceToHost));
+				cutilSafeCall(cudaMemcpy(h_signalOUT, i_signalOUT, sizeof(int)*signalSize, cudaMemcpyDeviceToHost));
 				// Lie about the current iteration to match other programs
 				printf("[%4.1f%%] Iteration %d: max err = %1.4f, ", 100.0f * (float)iter / (float)testPrime, iter - 1, maxerr);
 				print_residue(testPrime, h_signalOUT, signalSize);
@@ -1380,7 +1238,7 @@ void mersenneTest(unsigned int testPrime, unsigned int signalSize, Real *d_signa
 	rebalanceIrrIntSEQGPU<<<1, 1>>>(i_signalOUT, bitsPerWord8, signalSize);
 	cutilCheckMsg("Kernel execution failed [ rebalanceIrrIntSEQGPU]");
 
-	cutilSafeCall(cudaMemcpy(h_signalOUT, i_signalOUT, i_sizeOUT, cudaMemcpyDeviceToHost));
+	cutilSafeCall(cudaMemcpy(h_signalOUT, i_signalOUT, sizeof(int)*signalSize, cudaMemcpyDeviceToHost));
 
 	bool nonZeros = false;
 	for (unsigned int i = 0; i < signalSize; i++) {
@@ -1415,31 +1273,7 @@ void mersenneTest(unsigned int testPrime, unsigned int signalSize, Real *d_signa
 	printf(", n = %d, %s v%s\n", signalSize, program_name, program_version);
 
 
-	//Destroy CUFFT context
-	cufftSafeCall(cufftDestroy(plan1));
-	cufftSafeCall(cufftDestroy(plan2));
-
-	// cleanup memory
-	free(h_signalOUT);
-	free(cp_signalOUT);
-	free(h_bases);
-	free(h_bitsPerWord);
-	free(h_bitsPerWord8);
-	free(h_A);
-	free(h_Ainv);
-	free(host_errArr);
-
-	cutilSafeCall(cudaFree(i_signalOUT));
-//	cutilSafeCall(cudaFree(d_signal));
-	cutilSafeCall(cudaFree(z_signal));
-
-	cutilSafeCall(cudaFree(i_hiBitArr));
-	cutilSafeCall(cudaFree(dev_A));
-	cutilSafeCall(cudaFree(dev_Ainv));
-	cutilSafeCall(cudaFree(bitsPerWord8));
-	cutilSafeCall(cudaFree(llint_signal));
-
-	cutilSafeCall(cudaFree(dev_errArr));
+	freeArrays();
 }
 
 Real *readCheckpoint(unsigned int testPrime, unsigned int *signalSize, unsigned int *resume_iter) {
@@ -1515,7 +1349,6 @@ Real *readCheckpoint(unsigned int testPrime, unsigned int *signalSize, unsigned 
 }
 
 void writeCheckpoint (Real *signal, unsigned int testPrime, unsigned int signalSize, unsigned int iter) {
-//	return;
 	FILE *fPtr;
 
 	(void) unlink (checkpoint_backup);
