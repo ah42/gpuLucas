@@ -541,10 +541,8 @@ int main(int argc, char* argv[]) {
 
 	if (resuming)
 		printf("\nResuming full test of M%d at iteration %d (%2.1f%%)\n\n", testPrime, resume_iter, 100.0f * (float)resume_iter / (float)testPrime);
-	cutilSafeCall(cudaEventCreate(&start));
-	cutilSafeCall(cudaEventCreate(&stop));
-	cutilSafeCall(cudaEventRecord(start, 0));
 
+	cutilSafeCall(cudaEventRecord(start, 0));
 	// If we're not resuming, this isn't malloc'd yet.
 	if (cp_signal == NULL)
 		cp_signal = (Real *) malloc(sizeof(Real)*signalSize);
