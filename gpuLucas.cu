@@ -422,7 +422,7 @@ int main(int argc, char* argv[]) {
 	if ( testPrime == 0) {
 			print_help();
 			fprintf(stderr, "testPrime not specified, aborting\n");
-			abort();
+			exit(-1);
 	}
 
 	sprintf(checkpoint_file, "%d" ".chk", testPrime);
@@ -886,8 +886,8 @@ int mallocArrays(int signalSize, int testPrime) {
 
 void freeArrays() {
 	//Destroy CUFFT context
-	cufftSafeCall(cufftDestroy(plan1));
 	cufftSafeCall(cufftDestroy(plan2));
+	cufftSafeCall(cufftDestroy(plan1));
 
 	// cleanup memory
 	free(h_signalOUT);
@@ -929,10 +929,11 @@ unsigned int findSignalSize(unsigned int testPrime) {
 		printf("Testing FFT lengths between %d and %d\n\n", min_nx, max_nx);
 
 	int retry = 0;
-restart_findSignalSize:
 	cudaEvent_t start_findSignalSize, stop_findSignalSize;
 	cutilSafeCall(cudaEventCreate(&start_findSignalSize));
 	cutilSafeCall(cudaEventCreate(&stop_findSignalSize));
+
+restart_findSignalSize:
 	float elapsedTime, maxerr;
 
 	// Need to run enough iterations to build-up the error, if there is any

@@ -6,8 +6,9 @@ NVCC_ARCHES += -gencode arch=compute_20,code=compute_20 -gencode arch=compute_13
 # Compiled targets, binary images will be embedded in the application
 #NVCC_ARCHES += -gencode arch=compute_20,code=sm_20 -gencode arch=compute_13,code=sm_13
 
-CFLAGS = -O3 -Wall
-NVCC_FLAGS = -O3 -use_fast_math $(NVCC_ARCHES) --compiler-options="$(CFLAGS) -fno-strict-aliasing" --ptxas-options=-v --maxrregcount 20
+OPT = -O3
+CFLAGS = $(OPT) -Wall
+NVCC_FLAGS = $(OPT) -use_fast_math $(NVCC_ARCHES) --compiler-options="$(CFLAGS) -fno-strict-aliasing" --ptxas-options=-v --maxrregcount 20
 
 all: gpuLucas
 
