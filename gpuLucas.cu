@@ -146,6 +146,8 @@
 #include <iostream>
 #include <math.h>
 #include <stdint.h>
+#include <signal.h>
+
 // most compilers do not have support for __float128 and needs an external library to
 // support extended precision
 #include <qd/dd_real.h>
@@ -181,6 +183,9 @@ int opt_quiet = 0;
 int opt_verbose = 0;
 char program_name[] = "gpuLucas";
 char program_version[] = "0.9.2";
+unsigned int iter = 0;
+unsigned int signalSize = 0, testPrime = 0;
+volatile int do_gracefulExit = 0;
 
 int resuming = 0;
 // checkpoint filename buffers
@@ -205,7 +210,7 @@ __constant__ int HI_MODMASK;
 // This includes all code for parallel carry-add of the balanced-variable base integers
 #include "IrrBaseBalanced.cu"
 
-static __host__ void initConstantSymbols(int testPrime, int signalSize) {
+static __host__ void initConstantSymbols() {
 
 	h_LO_BITS = testPrime/signalSize;
 	h_HI_BITS = testPrime/signalSize + 1;
@@ -256,7 +261,7 @@ static __global__ void loadIntToDoubleIBDWT(double *dArr, int *iArr, int *iHiArr
  * Where the positions 0=current, 1=next, 2=nextnext, etc.
  *    The BASE_HI, BASE_LO, HI_BITS, LO_BITS are global constants.
  */
-static __host__ void computeBitsPerWord(int testPrime, int *bitsPerWord, int size);
+static __host__ void computeBitsPerWord(int *bitsPerWord, int size);
 static __host__ void computeBitsPerWordVectors(unsigned char *bitsPerWord8, int *bitsPerWord, int size);
 
 /**
@@ -270,7 +275,7 @@ static __host__ float findMaxErrorHOST(float *dev_fltArr, float *host_temp, int 
  *   and load them to the host arrays.  We include the FFT 1/N scaling with
  *   host_ainv and pull it out of the pointwiseSqrAndScale code
  */
-static __host__ void computeWeightVectors(double *host_A, double *host_Ainv, int testPrime, int size);
+static __host__ void computeWeightVectors(double *host_A, double *host_Ainv, int size);
 
 /**
  * This completes the invDWT transform by multiplying the signal by a_inv,
@@ -304,7 +309,7 @@ void (*sliceAndDice)(int *iArr, int *hiArr, int64_t *lliArr, unsigned char *bper
  * Auto-selected signalSize will almost always choose cases 17 through 19.
  */
   
-void setSliceAndDice(int testPrime, int signalSize) {
+void setSliceAndDice() {
 
 	int ratio = testPrime / signalSize;
 
@@ -334,14 +339,23 @@ void setSliceAndDice(int testPrime, int signalSize) {
  *    the average time per Lucas-Lehmer iteration based on timing
  *    of convolution-multiply and rebalancing functions
  */
-float errorTrial(unsigned int testIterations, unsigned int testPrime, unsigned int signalSize);
-unsigned int findSignalSize(unsigned int testPrime);
-void mersenneTest(unsigned int testPrime, unsigned int signalSize, Real *d_signal, unsigned int iter);
+float errorTrial(unsigned int testIterations);
+unsigned int findSignalSize();
+void mersenneTest(Real *d_signal);
 
-void writeCheckpoint(Real *signal, unsigned int testPrime, unsigned int signalSize, unsigned int iter);
-Real *readCheckpoint(unsigned int testPrime, unsigned int *signalSize, unsigned int *resume_iter);
+void writeCheckpoint(Real *signal);
+Real *readCheckpoint(unsigned int *signalSize, unsigned int *resume_iter);
 
 void printFriendlyTime(char *buf, int time);
+
+int mallocArrays();
+void freeArrays();
+
+void gracefulExit(int sig) {
+	printf("[%4.1f] Iter %d: Received signal %d, performing graceful exit\n", 
+			100 * (float)iter/(float)testPrime, iter - 1, sig);
+	do_gracefulExit = 1;
+}
 
 /**
  * print_help()
@@ -360,7 +374,6 @@ void print_help() {
 // Program main
 ////////////////////////////////////////////////////////////////////////////////
 int main(int argc, char* argv[]) {
-	unsigned int signalSize = 0, testPrime = 0;
 	int c;
 	int use_device = 0;
 
@@ -455,22 +468,22 @@ int main(int argc, char* argv[]) {
 
 	unsigned int resume_iter = 0;
 
-	if ((cp_signal = readCheckpoint(testPrime, &signalSize, &resume_iter)) != NULL)
+	if ((cp_signal = readCheckpoint(&signalSize, &resume_iter)) != NULL)
 		resuming = 1;
 
 	if (signalSize == 0)  {
-		signalSize = findSignalSize(testPrime);
+		signalSize = findSignalSize();
 		printf("Optimal signalSize detected: %d\n\n", signalSize);
 	} else
 		printf("Using specified FFT runlength %d\n\n", signalSize);
 
 	// BEGIN by initializing constant memory on device
-	initConstantSymbols(testPrime, signalSize);
+	initConstantSymbols();
 
 	// Based on the problem size, and runlength, set the number of carry digits
 	//   and assign the global slice-and-dice function from the templated
 	//   llintToBalInt<n>() function
-	setSliceAndDice(testPrime, signalSize);
+	setSliceAndDice();
 
 
 	if ((int)sizeof(int64_t) != 8) {
@@ -510,7 +523,7 @@ int main(int argc, char* argv[]) {
 	// errorTrial() called to give an estimate of convolution sizes and errors,
 	// as well as FFT timings and rebalancing time.
 	// Return value is average time per Lucas-Lehmer iteration based on GPU timings
-	float elapsedMsecDEV = errorTrial(testIterations, testPrime, signalSize);
+	float elapsedMsecDEV = errorTrial(testIterations);
 
 	// stop the timer
 	cutilSafeCall(cudaEventRecord(stop, 0));
@@ -545,15 +558,27 @@ int main(int argc, char* argv[]) {
 		printf("\n  est. total time:\t%10s\n\n",
 				buf);
 
-	if (resuming)
+	if (resuming) {
 		printf("\nResuming full test of M%d at iteration %d (%2.1f%%)\n\n", testPrime, resume_iter, 100.0f * (float)resume_iter / (float)testPrime);
+		iter = resume_iter;
+	}
+
+	// prepare graceful-exit signal handler
+	struct sigaction act;
+	act.sa_handler = gracefulExit;
+	sigemptyset(&act.sa_mask);
+	act.sa_flags = 0;
+	sigaction(SIGINT, &act, 0);
+	sigaction(SIGQUIT, &act, 0);
+	sigaction(SIGTERM, &act, 0);
+	sigaction(SIGTSTP, &act, 0);
 
 	cutilSafeCall(cudaEventRecord(start, 0));
 	// If we're not resuming, this isn't malloc'd yet.
 	if (cp_signal == NULL)
 		cp_signal = (Real *) malloc(sizeof(Real)*signalSize);
 
-	mersenneTest(testPrime, signalSize, cp_signal, resume_iter);
+	mersenneTest(cp_signal);
 
 	// This isn't free'd by freeArrays();
 	if (cp_signal != NULL)
@@ -568,12 +593,14 @@ int main(int argc, char* argv[]) {
 	cutilSafeCall(cudaEventDestroy(start));
 	cutilSafeCall(cudaEventDestroy(stop));
 
-	// Remove checkpoint files	
-	(void) unlink (checkpoint_file);
-	(void) unlink (checkpoint_backup);
+	if (!do_gracefulExit) {
+		// Remove checkpoint files unless we're exiting gracefully
+		(void) unlink (checkpoint_file);
+		(void) unlink (checkpoint_backup);
+	}
 
 	printf("\nTotal elapsed time:\t%10.f msec = %.1f sec\n",
-		   elapsedMsec, elapsedMsec/1000);
+			elapsedMsec, elapsedMsec/1000);
 
 	cutilDeviceReset();
 	exit(EXIT_SUCCESS);
@@ -603,14 +630,14 @@ static __global__ void ComplexPointwiseSqr(Complex* cval, int size) {
  * Uses dd_real 128-bit double-doubles to avoid catastropic cancellation errors
  *   for non-power-of-two FFT lengths
  */
-static __host__ void computeWeightVectors(double *host_A, double *host_Ainv, int testPrime, int size) {
+static __host__ void computeWeightVectors(double *host_A, double *host_Ainv, int size) {
 
 	dd_real dd_A, dd_Ainv;
 	dd_real dd_N = dd_real(size);
 	dd_real dd_2 = dd_real(2.0);
 
 	for (int ddex = 0; ddex < size; ddex++) {
-		dd_real dd_expo = dd_real(ddex)*dd_real(testPrime)/dd_N;
+		dd_real dd_expo = dd_real(ddex)*dd_real((int)testPrime)/dd_N;
 		dd_A = pow(dd_2, ceil(dd_expo) - dd_expo);
 		dd_Ainv = (1.0 / dd_A) / dd_N;
 		host_A[ddex] = to_double(dd_A);
@@ -618,7 +645,7 @@ static __host__ void computeWeightVectors(double *host_A, double *host_Ainv, int
 	}
 }
 
-static __host__ void computeBitsPerWord(int testPrime, int *bitsPerWord, int size) {
+static __host__ void computeBitsPerWord(int *bitsPerWord, int size) {
 
 	double PoverN = testPrime/(double)size;
 	for (int j = 1; j <= size; j++) {	
@@ -732,7 +759,7 @@ static __global__ void computeMaxBitVector(float *dev_errArr, int64_t *llint_sig
  */
 
 template <int check_error, int timing>
-static inline float mersenneIter(unsigned int testPrime, unsigned int signalSize, int iter) {
+static inline float mersenneIter() {
 	// We assume throughout that signalSize is divisible by T_PER_B
 	const int numBlocks = signalSize/T_PER_B;
 	const int numFFTblocks = (signalSize/2 + 1)/T_PER_B + 1; 
@@ -824,7 +851,7 @@ static inline float mersenneIter(unsigned int testPrime, unsigned int signalSize
  * mallocArrays()
  * cudaMalloc the GPU arrays
  */
-int mallocArrays(int signalSize, int testPrime) {
+int mallocArrays() {
 	// Allocate device memory for signal
 	int i_sizeOUT = sizeof(int)*signalSize;
 	int d_size = sizeof(Real)*signalSize;
@@ -869,7 +896,7 @@ int mallocArrays(int signalSize, int testPrime) {
 	cutilSafeCall(cudaMemset(dev_errArr, 0, signalSize*sizeof(float)));
 
 	// Compute word-sizes to use when dicing products to sum to int array
-	computeBitsPerWord(testPrime, h_bitsPerWord, signalSize);
+	computeBitsPerWord(h_bitsPerWord, signalSize);
 	computeBitsPerWordVectors(h_bitsPerWord8, h_bitsPerWord, signalSize);
 	cutilSafeCall(cudaMemcpy(bitsPerWord8, h_bitsPerWord8, bpw_size, cudaMemcpyHostToDevice));
 
@@ -877,7 +904,7 @@ int mallocArrays(int signalSize, int testPrime) {
 	h_Ainv = (double *) malloc(signalSize*sizeof(double));
 	
 	// compute weights in extended precision, essential for non-power-of-two signal_size
-	computeWeightVectors(h_A, h_Ainv, testPrime, signalSize);
+	computeWeightVectors(h_A, h_Ainv, signalSize);
 	cutilSafeCall(cudaMemcpy(dev_A, h_A, sizeof(double)*signalSize, cudaMemcpyHostToDevice));
 	cutilSafeCall(cudaMemcpy(dev_Ainv, h_Ainv, sizeof(double)*signalSize, cudaMemcpyHostToDevice));
 
@@ -916,10 +943,10 @@ void freeArrays() {
  * Determines the best signalSize to use for a given testPrime
  * Choice based on runtime and error
  */
-unsigned int findSignalSize(unsigned int testPrime) {
+unsigned int findSignalSize() {
 	int optimal_length = 0;
 	float bestTime = 99999;
-	uint64_t signalSize; // need to be bigger than necessary so some of the FFTlen combinations don't overflow
+	uint64_t signalSize64; // need to be bigger than necessary so some of the FFTlen combinations don't overflow
 	// Only use lengths that are between 1/15th and 1/20th the testPrime
 	// and round it up to the nearest T_PER_B size, since we're only testing multiples of T_PER_B
 	int max_nx = ((testPrime / 17 / T_PER_B) + 1) * T_PER_B;
@@ -944,14 +971,15 @@ restart_findSignalSize:
 		for (int three = 0; three <= MAX_3; three++) {
 			for (int five = 0; five <= MAX_5; five++) {
 				for (int seven = 0; seven <= MAX_7; seven++) {
-					signalSize = (powl(2,two) * powl(3,three) * powl(5,five) * powl(7,seven));
-					if ((signalSize <= (unsigned int)max_nx) & (signalSize >= (unsigned int)min_nx) & (signalSize % T_PER_B == 0)) {
+					signalSize64 = (powl(2,two) * powl(3,three) * powl(5,five) * powl(7,seven));
+					if ((signalSize64 <= (unsigned int)max_nx) & (signalSize64 >= (unsigned int)min_nx) & (signalSize64 % T_PER_B == 0)) {
 						maxerr = 0;
+						signalSize = signalSize64;
 						int numBlocks = signalSize/T_PER_B;
-						setSliceAndDice(testPrime, signalSize);
-						initConstantSymbols(testPrime, signalSize);
+						setSliceAndDice();
+						initConstantSymbols();
  
-						mallocArrays(signalSize, testPrime);
+						mallocArrays();
 
 						// load the int array to the doubles for FFT
 						// This is already balanced, and already multiplied by a_0 = 1 for DWT
@@ -962,7 +990,7 @@ restart_findSignalSize:
 						// start timer
 						cutilSafeCall(cudaEventRecord(start_findSignalSize, 0));
 						for (; iter < testIterations; iter++) {
-							mersenneIter<1, 0>(testPrime, signalSize, iter);
+							mersenneIter<1, 0>();
 
 							float this_err = findMaxErrorHOST(dev_errArr, host_errArr, signalSize);
 							maxerr = std::max(this_err, maxerr);
@@ -1022,7 +1050,7 @@ restart_findSignalSize:
 /**
 * errorTrial()
 */
-float errorTrial(unsigned int testIterations, unsigned int testPrime, unsigned int signalSize) {
+float errorTrial(unsigned int testIterations) {
 
 	// We assume throughout that signalSize is divisible by T_PER_B
 	const int numBlocks = signalSize/T_PER_B;
@@ -1032,7 +1060,7 @@ float errorTrial(unsigned int testIterations, unsigned int testPrime, unsigned i
 	if (testIterations<100)
 		testIterations = 100;
 
-	mallocArrays(signalSize, testPrime);
+	mallocArrays();
 
 	if (opt_verbose) {
 		for (int i = 0; i < 20; i++) {
@@ -1065,9 +1093,9 @@ float errorTrial(unsigned int testIterations, unsigned int testPrime, unsigned i
 
 	float totalTime = 0;
 	// Loop testIterations times
-	for (unsigned int iter = 0; iter < testIterations; iter++) {
+	for (iter = 0; iter < testIterations; iter++) {
 		if (iter % (testIterations/100) == 0) {
-			float perIterTime = mersenneIter<1, 1>(testPrime, signalSize, iter);
+			float perIterTime = mersenneIter<1, 1>();
 
 			// If mersenneIter returned an error value, pass it along
 			if (perIterTime < 0) {
@@ -1078,7 +1106,7 @@ float errorTrial(unsigned int testIterations, unsigned int testPrime, unsigned i
 			totalTime += perIterTime;
 		}
 		else {
-			mersenneIter<0, 0>(testPrime, signalSize, iter);
+			mersenneIter<0, 0>();
 		}
 	}
 	
@@ -1119,7 +1147,7 @@ float errorTrial(unsigned int testIterations, unsigned int testPrime, unsigned i
 * print_residue() -- output the Lucas-Lehmer residue for non-prime exponents
 *   needed for result submission to GIMPS, or verifying results with other clients
 */
-void print_residue(int testPrime, int *h_signalOUT, int signalSize) {
+void print_residue(int *h_signalOUT) {
 	static uint64_t *hex = NULL;
 	static uint64_t prior_hex = 0;
 
@@ -1189,12 +1217,12 @@ void print_residue(int testPrime, int *h_signalOUT, int signalSize) {
 * mersenneTest() -- full test of 2^testPrime - 1, including max error term every 1/50th
 *   time through loop
 */
-void mersenneTest(unsigned int testPrime, unsigned int signalSize, Real *cp_signal, unsigned int iter) {
+void mersenneTest(Real *cp_signal) {
 
 	// We assume throughout that signalSize is divisible by T_PER_B
 	const int numBlocks = signalSize/T_PER_B;
 
-	mallocArrays(signalSize, testPrime);
+	mallocArrays();
 
 	if (resuming) {
 		cutilSafeCall(cudaMemcpy(d_signal, cp_signal, sizeof(Real) * signalSize, cudaMemcpyHostToDevice));
@@ -1212,7 +1240,7 @@ void mersenneTest(unsigned int testPrime, unsigned int signalSize, Real *cp_sign
 	// float maxerr = 0.0f;
 
 
-	int last_cp_iter = iter;
+	unsigned int last_cp_iter = iter;
 
 	// Timers for displaying timing at checkpoint, and ETA to completion
 	// Only used if not quiet
@@ -1224,26 +1252,36 @@ void mersenneTest(unsigned int testPrime, unsigned int signalSize, Real *cp_sign
 	cutilSafeCall(cudaEventSynchronize(cp_start));
 
 	// Loop M-2 times
-	for (; iter < testPrime; iter++) {
+	for (; iter < testPrime & !do_gracefulExit; iter++) {
 		// Every so often, do some error checking. Do this at every checkpoint as well
 		if ((iter % (testPrime/1000) == 0) | (iter % checkpoint_freq == 1)) {
-			mersenneIter<1, 0>(testPrime, signalSize, iter);
+			mersenneIter<1, 0>();
 			// maxerr = findMaxErrorHOST(dev_errArr, host_errArr, signalSize);
 			// FIXME: -Aaron: we should add a way to stop/restart if the error is too high.
 		} else {
-			mersenneIter<0, 0>(testPrime, signalSize, iter);
+			mersenneIter<0, 0>();
 		}
 
 		// Checkpoint every checkpoint_freq iterations
 		// To match CUDALucas output: CL counts iterations differently and thus displays residue at what we consider to be iteration+1
-		if (iter % checkpoint_freq == 1) {
+		if (iter % checkpoint_freq == 1 | do_gracefulExit == 1) {
+			// Whatever we do, do not allow an interrupt while we're writing a checkpoint for risk of corrupting the checkpoint files
+			sigset_t x;
+			sigemptyset (&x);
+			sigaddset(&x, SIGINT);
+			sigaddset(&x, SIGQUIT);
+			sigaddset(&x, SIGTERM);
+			sigaddset(&x, SIGTSTP);
+			sigprocmask(SIG_BLOCK, &x, NULL);
+
 			// This sync shouldn't be necessary, but it's best to be safe when writing a checkpoint
 			// Timing cost of memcpy and writing the checkpoint is negligible < .01ms
 			cutilDeviceSynchronize();
 			cutilSafeCall(cudaMemcpy(cp_signal, d_signal, sizeof(Real) * signalSize, cudaMemcpyDeviceToHost));
-			writeCheckpoint(cp_signal, testPrime, signalSize, iter + 1);
+			writeCheckpoint(cp_signal);
+			sigprocmask(SIG_UNBLOCK, &x, NULL);
 
-			if (!opt_quiet) {
+			if (!opt_quiet & !do_gracefulExit) {
 				cutilSafeCall(cudaEventRecord(cp_stop, 0));
 				cutilSafeCall(cudaEventSynchronize(cp_stop));
 
@@ -1278,7 +1316,7 @@ void mersenneTest(unsigned int testPrime, unsigned int signalSize, Real *cp_sign
 				printFriendlyTime(buf, eta_diff);
 				// Lie about the current iteration to match other programs
 				printf("[%4.1f%%] Iter %d: %01.2f ms/iter, ETA %s, ", 100.0f * (float)iter / (float)testPrime, iter - 1, iter_time, buf);
-				print_residue(testPrime, h_signalOUT, signalSize);
+				print_residue(h_signalOUT);
 				printf("\n");
 			}
 		}
@@ -1286,6 +1324,13 @@ void mersenneTest(unsigned int testPrime, unsigned int signalSize, Real *cp_sign
 
 	cutilSafeCall(cudaEventDestroy(cp_stop));
 	cutilSafeCall(cudaEventDestroy(cp_start));
+
+	
+	if (do_gracefulExit) {
+		// no need to do the rest of this function, if we're exiting early gracefully
+		freeArrays();
+		return;
+	}
 
 	// DONE!  Final copy out from GPU, since not done by default as for CPU stages
 	// DO GOOD REBALANCE HERE
@@ -1321,7 +1366,7 @@ void mersenneTest(unsigned int testPrime, unsigned int signalSize, Real *cp_sign
 			printf("\nM_%d tests as non-prime.\n\n", testPrime);
 
 		printf("\nM( %d )C, ", testPrime);
-		print_residue(testPrime, h_signalOUT, signalSize);
+		print_residue(h_signalOUT);
 	} else {
 		printf("\n\n\aPRIME FOUND: M_%d tests as prime.", testPrime);
 		printf("\nM( %d )P", testPrime);
@@ -1349,7 +1394,7 @@ void printFriendlyTime(char *buf, int time) {
 	sprintf(buf + length, "%02d:%02d", (time%3600)/60, time%60);
 }
 
-Real *readCheckpoint(unsigned int testPrime, unsigned int *signalSize, unsigned int *resume_iter) {
+Real *readCheckpoint(unsigned int *signalSize, unsigned int *resume_iter) {
 	FILE *fPtr;
 	unsigned int testPrime_r, signalSize_r, resumeiter_r; 
 	Real *signal;
@@ -1416,12 +1461,12 @@ Real *readCheckpoint(unsigned int testPrime, unsigned int *signalSize, unsigned 
 	}
 
 	// We have a good checkpoint. Return it
-	*resume_iter = resumeiter_r;
+	*resume_iter = resumeiter_r + 1;
 	*signalSize = signalSize_r;
 	return signal;
 }
 
-void writeCheckpoint (Real *signal, unsigned int testPrime, unsigned int signalSize, unsigned int iter) {
+void writeCheckpoint (Real *signal) {
 	FILE *fPtr;
 
 	(void) unlink (checkpoint_backup);
@@ -1443,5 +1488,6 @@ void writeCheckpoint (Real *signal, unsigned int testPrime, unsigned int signalS
 	fwrite (&signalSize     , 1, sizeof (signalSize)       , fPtr);
 	fwrite (&iter           , 1, sizeof (iter)             , fPtr);
 	fwrite (signal          , 1, sizeof (Real) * signalSize, fPtr);
+	sync();
 	fclose (fPtr);
 }
