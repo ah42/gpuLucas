@@ -339,19 +339,19 @@ void setSliceAndDice() {
  *    the average time per Lucas-Lehmer iteration based on timing
  *    of convolution-multiply and rebalancing functions
  */
-float errorTrial(unsigned int testIterations);
-unsigned int findSignalSize();
-void mersenneTest(Real *d_signal);
+static __host__ float errorTrial(unsigned int testIterations);
+static __host__ unsigned int findSignalSize();
+static __host__ void mersenneTest(Real *d_signal);
 
-void writeCheckpoint(Real *signal);
-Real *readCheckpoint(unsigned int *signalSize, unsigned int *resume_iter);
+static __host__ void writeCheckpoint(Real *signal);
+static __host__ Real *readCheckpoint(unsigned int *signalSize, unsigned int *resume_iter);
 
-void printFriendlyTime(char *buf, int time);
+static __host__ void printFriendlyTime(char *buf, int time);
 
-int mallocArrays();
-void freeArrays();
+static __host__ int mallocArrays();
+static __host__ void freeArrays();
 
-void gracefulExit(int sig) {
+static __host__ void gracefulExit(int sig) {
 	printf("[%4.1f] Iter %d: Received signal %d, performing graceful exit\n", 
 			100 * (float)iter/(float)testPrime, iter - 1, sig);
 	do_gracefulExit = 1;
@@ -759,7 +759,7 @@ static __global__ void computeMaxBitVector(float *dev_errArr, int64_t *llint_sig
  */
 
 template <int check_error, int timing>
-static inline float mersenneIter() {
+static __host__ float mersenneIter() {
 	// We assume throughout that signalSize is divisible by T_PER_B
 	const int numBlocks = signalSize/T_PER_B;
 	const int numFFTblocks = (signalSize/2 + 1)/T_PER_B + 1; 
@@ -851,7 +851,7 @@ static inline float mersenneIter() {
  * mallocArrays()
  * cudaMalloc the GPU arrays
  */
-int mallocArrays() {
+static __host__ int mallocArrays() {
 	// Allocate device memory for signal
 	int i_sizeOUT = sizeof(int)*signalSize;
 	int d_size = sizeof(Real)*signalSize;
@@ -911,7 +911,7 @@ int mallocArrays() {
 	return 1;
 }
 
-void freeArrays() {
+static __host__ void freeArrays() {
 	//Destroy CUFFT context
 	cufftSafeCall(cufftDestroy(plan2));
 	cufftSafeCall(cufftDestroy(plan1));
@@ -943,7 +943,7 @@ void freeArrays() {
  * Determines the best signalSize to use for a given testPrime
  * Choice based on runtime and error
  */
-unsigned int findSignalSize() {
+static __host__ unsigned int findSignalSize() {
 	int optimal_length = 0;
 	float bestTime = 99999;
 	uint64_t signalSize64; // need to be bigger than necessary so some of the FFTlen combinations don't overflow
@@ -1050,7 +1050,7 @@ restart_findSignalSize:
 /**
 * errorTrial()
 */
-float errorTrial(unsigned int testIterations) {
+static __host__ float errorTrial(unsigned int testIterations) {
 
 	// We assume throughout that signalSize is divisible by T_PER_B
 	const int numBlocks = signalSize/T_PER_B;
@@ -1098,7 +1098,7 @@ float errorTrial(unsigned int testIterations) {
 			float perIterTime = mersenneIter<1, 1>();
 
 			// If mersenneIter returned an error value, pass it along
-			if (perIterTime < 0) {
+			if (unlikely(perIterTime < 0)) {
 				totalTime = -1;
 				break;
 			}
@@ -1147,7 +1147,7 @@ float errorTrial(unsigned int testIterations) {
 * print_residue() -- output the Lucas-Lehmer residue for non-prime exponents
 *   needed for result submission to GIMPS, or verifying results with other clients
 */
-void print_residue(int *h_signalOUT) {
+static __host__ void print_residue(int *h_signalOUT) {
 	static uint64_t *hex = NULL;
 	static uint64_t prior_hex = 0;
 
@@ -1217,7 +1217,7 @@ void print_residue(int *h_signalOUT) {
 * mersenneTest() -- full test of 2^testPrime - 1, including max error term every 1/50th
 *   time through loop
 */
-void mersenneTest(Real *cp_signal) {
+static __host__ void mersenneTest(Real *cp_signal) {
 
 	// We assume throughout that signalSize is divisible by T_PER_B
 	const int numBlocks = signalSize/T_PER_B;
@@ -1251,10 +1251,17 @@ void mersenneTest(Real *cp_signal) {
 	cutilSafeCall(cudaEventRecord(cp_start, 0));
 	cutilSafeCall(cudaEventSynchronize(cp_start));
 
+	sigset_t x;
+	sigemptyset (&x);
+	sigaddset(&x, SIGINT);
+	sigaddset(&x, SIGQUIT);
+	sigaddset(&x, SIGTERM);
+	sigaddset(&x, SIGTSTP);
+
 	// Loop M-2 times
-	for (; iter < testPrime & !do_gracefulExit; iter++) {
+	for (; iter < testPrime; iter++) {
 		// Every so often, do some error checking. Do this at every checkpoint as well
-		if ((iter % (testPrime/1000) == 0) | (iter % checkpoint_freq == 1)) {
+		if (unlikely((iter % (testPrime/1000) == 0) | (iter % checkpoint_freq == 1))) {
 			mersenneIter<1, 0>();
 			// maxerr = findMaxErrorHOST(dev_errArr, host_errArr, signalSize);
 			// FIXME: -Aaron: we should add a way to stop/restart if the error is too high.
@@ -1264,14 +1271,8 @@ void mersenneTest(Real *cp_signal) {
 
 		// Checkpoint every checkpoint_freq iterations
 		// To match CUDALucas output: CL counts iterations differently and thus displays residue at what we consider to be iteration+1
-		if (iter % checkpoint_freq == 1 | do_gracefulExit == 1) {
+		if (unlikely(iter % checkpoint_freq == 1 | do_gracefulExit == 1)) {
 			// Whatever we do, do not allow an interrupt while we're writing a checkpoint for risk of corrupting the checkpoint files
-			sigset_t x;
-			sigemptyset (&x);
-			sigaddset(&x, SIGINT);
-			sigaddset(&x, SIGQUIT);
-			sigaddset(&x, SIGTERM);
-			sigaddset(&x, SIGTSTP);
 			sigprocmask(SIG_BLOCK, &x, NULL);
 
 			// This sync shouldn't be necessary, but it's best to be safe when writing a checkpoint
@@ -1281,7 +1282,14 @@ void mersenneTest(Real *cp_signal) {
 			writeCheckpoint(cp_signal);
 			sigprocmask(SIG_UNBLOCK, &x, NULL);
 
-			if (!opt_quiet & !do_gracefulExit) {
+			if (unlikely(do_gracefulExit)) {
+				// no need to do the rest of this function, if we're exiting early gracefully
+				freeArrays();
+				return;
+			}    
+
+
+			if (!opt_quiet) {
 				cutilSafeCall(cudaEventRecord(cp_stop, 0));
 				cutilSafeCall(cudaEventSynchronize(cp_stop));
 
@@ -1378,7 +1386,7 @@ void mersenneTest(Real *cp_signal) {
 	return;
 }
 
-void printFriendlyTime(char *buf, int time) {
+static __host__ void printFriendlyTime(char *buf, int time) {
 	int length = 0;
 	if (time >= 86400) {
 		// print days
@@ -1394,7 +1402,7 @@ void printFriendlyTime(char *buf, int time) {
 	sprintf(buf + length, "%02d:%02d", (time%3600)/60, time%60);
 }
 
-Real *readCheckpoint(unsigned int *signalSize, unsigned int *resume_iter) {
+static __host__ Real *readCheckpoint(unsigned int *signalSize, unsigned int *resume_iter) {
 	FILE *fPtr;
 	unsigned int testPrime_r, signalSize_r, resumeiter_r; 
 	Real *signal;
@@ -1466,7 +1474,7 @@ Real *readCheckpoint(unsigned int *signalSize, unsigned int *resume_iter) {
 	return signal;
 }
 
-void writeCheckpoint (Real *signal) {
+static __host__ void writeCheckpoint (Real *signal) {
 	FILE *fPtr;
 
 	(void) unlink (checkpoint_backup);

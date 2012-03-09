@@ -12,7 +12,7 @@ NVCC_FLAGS = $(OPT) -use_fast_math $(NVCC_ARCHES) --compiler-options="$(CFLAGS) 
 
 all: gpuLucas
 
-gpuLucas.o: gpuLucas.cu IrrBaseBalanced.cu
+gpuLucas.o: gpuLucas.cu IrrBaseBalanced.cu cuda_safecalls.h
 	nvcc -c -o $@ gpuLucas.cu $(NVCC_FLAGS)
 
 gpuLucas: gpuLucas.o
