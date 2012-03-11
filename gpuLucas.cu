@@ -733,7 +733,7 @@ static __global__ void invDWTproductMinus2(int64_t *llintArr, double *signal, do
  */
 static __host__ float findMaxErrorHOST(float *dev_fltArr, float *host_temp, int len) {
 
-	cudaMemcpy(host_temp, dev_fltArr, sizeof(float)*len, cudaMemcpyDeviceToHost);
+	cutilSafeCall(cudaMemcpy(host_temp, dev_fltArr, sizeof(float)*len, cudaMemcpyDeviceToHost));
 	float maxVal = 0.0f;
 	for (int i = 0; i < len; i++)
 		if (host_temp[i] > maxVal)
@@ -994,7 +994,7 @@ restart_findSignalSize:
 						int iter = 0;
 						// start timer
 						cutilSafeCall(cudaEventRecord(start_findSignalSize, 0));
-						for (; iter < testIterations; iter++) {
+						for (; likely(iter < testIterations); iter++) {
 							mersenneIter<1, 0>();
 
 							float this_err = findMaxErrorHOST(dev_errArr, host_errArr, signalSize);
@@ -1097,7 +1097,7 @@ static __host__ float errorTrial(unsigned int testIterations) {
 
 	float totalTime = 0;
 	// Loop testIterations times
-	for (iter = 0; iter < testIterations; iter++) {
+	for (iter = 0; likely(iter < testIterations); iter++) {
 		if (iter % (testIterations/100) == 0) {
 			float perIterTime = mersenneIter<1, 1>();
 
@@ -1262,7 +1262,7 @@ static __host__ void mersenneTest(Real *cp_signal) {
 	numFFTblocks = (signalSize/2 + 1)/T_PER_B + 1;
 
 	// Loop M-2 times
-	for (; iter < testPrime; iter++) {
+	for (; likely(iter < testPrime); iter++) {
 		// Every so often, do some error checking. Do this at every checkpoint as well
 		if (unlikely((iter % (testPrime/1000) == 0) | (iter % checkpoint_freq == 1))) {
 			mersenneIter<1, 0>();
@@ -1314,8 +1314,12 @@ static __host__ void mersenneTest(Real *cp_signal) {
 
 				// Display current iteration's residue and error
 				addPseudoBalanced<<<numBlocks, T_PER_B>>>(i_signalOUT, i_hiBitArr, signalSize);
+				cutilCheckMsg("Kernel execution failed [ addPseudoBalanced ]");
+				
 				// FIXME: Timing cost of the rebalance is expensive > .5 seconds per call for 26xxxxxx exponent
 				rebalanceIrrIntSEQGPU<<<1, 1>>>(i_signalOUT, bitsPerWord8, signalSize);
+				cutilCheckMsg("Kernel execution failed [ rebalanceIrrIntSEQGPU ]");
+
 				cutilSafeCall(cudaMemcpy(h_signalOUT, i_signalOUT, sizeof(int)*signalSize, cudaMemcpyDeviceToHost));
 
 				// buf needs to fit formatted eta_time
