@@ -252,9 +252,9 @@ static cufftHandle plan1, plan2;
  *   but give an overview of the functions so left it.
  */
 
-static __global__ void ComplexPointwiseSqr(Complex*, int);
-static __global__ void loadValue4ToFFTarray(double*, int);
-static __global__ void loadIntToDoubleIBDWT(double *dArr, int *iArr, int *iHiArr, double *aArr, int size);
+static __global__ void ComplexPointwiseSqr(Complex* z_signal, int signalSize);
+static __global__ void loadValue4ToFFTarray(double *d_signal);
+static __global__ void loadIntToDoubleIBDWT(double *d_signal, int *i_signalOUT, int *i_hiBitArr, double *dev_A, int signalSize);
 
 /*
  * In bitsPerWord, we use a bit-vector:
@@ -263,28 +263,28 @@ static __global__ void loadIntToDoubleIBDWT(double *dArr, int *iArr, int *iHiArr
  * Where the positions 0=current, 1=next, 2=nextnext, etc.
  *    The BASE_HI, BASE_LO, HI_BITS, LO_BITS are global constants.
  */
-static __host__ void computeBitsPerWord(int *bitsPerWord, int size);
-static __host__ void computeBitsPerWordVectors(unsigned char *bitsPerWord8, int *bitsPerWord, int size);
+static __host__ void computeBitsPerWord(int *bitsPerWord, int signalSize);
+static __host__ void computeBitsPerWordVectors(unsigned char *bitsPerWord8, int *bitsPerWord, int signalSize);
 
 /**
  * code for convolution error-checking
  */
-static __global__ void computeMaxBitVector(float *dev_errArr, int64_t *llint_signal, int len);
-static __host__ float findMaxErrorHOST(float *dev_fltArr, float *host_temp, int len);
+static __global__ void computeMaxBitVector(float *dev_errArr, int64_t *llint_signal, int signalSize);
+static __host__ float findMaxErrorHOST(float *dev_errArr, float *host_errArr, int signalSize);
 
 /**
  * compute A and Ainv in extended precision, cast to doubles
  *   and load them to the host arrays.  We include the FFT 1/N scaling with
  *   host_ainv and pull it out of the pointwiseSqrAndScale code
  */
-static __host__ void computeWeightVectors(double *host_A, double *host_Ainv, int size);
+static __host__ void computeWeightVectors(double *host_A, double *host_Ainv, int signalSize);
 
 /**
  * This completes the invDWT transform by multiplying the signal by a_inv,
  *   and subtracts 2 from signal[0], requiring no carry in current weighted carry-save state
  */
 template <int error>
-static __global__ void invDWTproductMinus2(int64_t *llintArr, double *signal, double *a_inv, float *errorvals, int size);
+static __global__ void invDWTproductMinus2(int64_t *llint_signal, double *d_signal, double *dev_Ainv, float *dev_errArr);
 
 
 /**
@@ -619,15 +619,15 @@ int main(int argc, char* argv[]) {
  */
 
 // Complex pointwise multiplication
-static __global__ void ComplexPointwiseSqr(Complex* cval, int size) {
+static __global__ void ComplexPointwiseSqr(Complex* z_signal, int size) {
 	Complex c, temp;
 	const int tid = blockIdx.x*blockDim.x + threadIdx.x;
 	if (tid < size) {
-		temp = cval[tid];
+		temp = z_signal[tid];
 		c.y = 2.0*temp.x*temp.y;
 		//c.x = (temp.x + temp.y)*(temp.x - temp.y);  xxAT ??
 		c.x = temp.x*temp.x - temp.y*temp.y;
-		cval[tid] = c;
+		z_signal[tid] = c;
 	}
 } 
 
@@ -637,13 +637,13 @@ static __global__ void ComplexPointwiseSqr(Complex* cval, int size) {
  * Uses dd_real 128-bit double-doubles to avoid catastropic cancellation errors
  *   for non-power-of-two FFT lengths
  */
-static __host__ void computeWeightVectors(double *host_A, double *host_Ainv, int size) {
+static __host__ void computeWeightVectors(double *host_A, double *host_Ainv, int signalSize) {
 
 	dd_real dd_A, dd_Ainv;
-	dd_real dd_N = dd_real(size);
+	dd_real dd_N = dd_real(signalSize);
 	dd_real dd_2 = dd_real(2.0);
 
-	for (int ddex = 0; ddex < size; ddex++) {
+	for (int ddex = 0; ddex < signalSize; ddex++) {
 		dd_real dd_expo = dd_real(ddex)*dd_real((int)testPrime)/dd_N;
 		dd_A = pow(dd_2, ceil(dd_expo) - dd_expo);
 		dd_Ainv = (1.0 / dd_A) / dd_N;
@@ -652,10 +652,10 @@ static __host__ void computeWeightVectors(double *host_A, double *host_Ainv, int
 	}
 }
 
-static __host__ void computeBitsPerWord(int *bitsPerWord, int size) {
+static __host__ void computeBitsPerWord(int *bitsPerWord, int signalSize) {
 
-	double PoverN = testPrime/(double)size;
-	for (int j = 1; j <= size; j++) {	
+	double PoverN = testPrime/(double)signalSize;
+	for (int j = 1; j <= signalSize; j++) {	
 		bitsPerWord[j - 1] = (int) (ceil(PoverN*j) - ceil(PoverN*(j - 1)));
 	}
 }
@@ -664,17 +664,17 @@ static __host__ void computeBitsPerWord(int *bitsPerWord, int size) {
  * do modular wrap-around to get successive words from element [size - 1]
  * Works backwards to get preceeding bits
  */
-static __host__ void computeBitsPerWordVectors(unsigned char *bitsPerWord8, int *bitsPerWord, int size) {
+static __host__ void computeBitsPerWordVectors(unsigned char *bitsPerWord8, int *bitsPerWord, int signalSize) {
 
-	for (int i = 0; i < size; i++) {
+	for (int i = 0; i < signalSize; i++) {
 		bitsPerWord8[i] = 0;
 
 		for (int bit = 0; bit < 8; bit++) {
 			short bitval;
 			if (i - bit < 0)
-				bitval = (bitsPerWord[size + i - bit] == h_LO_BITS ? 0 : 1);
+				bitval = (bitsPerWord[signalSize + i - bit] == h_LO_BITS ? 0 : 1);
 			else
-				bitval = (bitsPerWord[       i - bit] == h_LO_BITS ? 0 : 1);
+				bitval = (bitsPerWord[             i - bit] == h_LO_BITS ? 0 : 1);
 			bitsPerWord8[i] |= bitval << bit;
 		}
 	}	
@@ -682,26 +682,26 @@ static __host__ void computeBitsPerWordVectors(unsigned char *bitsPerWord8, int 
 
 // load values of int array into double array for FFT.  Low-order 2 bytes go in lowest numbered
 //     position in dArr
-static __global__ void loadValue4ToFFTarray(double *dArr, int size) {
+static __global__ void loadValue4ToFFTarray(double *dev_A) {
 
 	const int tid = blockIdx.x*blockDim.x + threadIdx.x;
 
 	if (tid == 0)
-		dArr[tid] = 4.0;
+		dev_A[tid] = 4.0;
 	else
-		dArr[tid] = 0.0;
+		dev_A[tid] = 0.0;
 }
 
 
 // This includes pseudobalance by adding hi order terms from last rebalancing.
-static __global__ void loadIntToDoubleIBDWT(double *dArr, int *iArr, int *iHiArr, double *aArr, int size) {
+static __global__ void loadIntToDoubleIBDWT(double *d_signal, int *i_signalOUT, int *i_hiBitArr, double *dev_A, int signalSize) {
 
 	const int tid = blockIdx.x*blockDim.x + threadIdx.x;
 	
-	int ival = iArr[tid];
-	ival += (tid == 0 ? iHiArr[size - 1] : iHiArr[tid - 1]);
+	int ival = i_signalOUT[tid];
+	ival += (tid == 0 ? i_hiBitArr[signalSize - 1] : i_hiBitArr[tid - 1]);
 
-	dArr[tid] = ival*aArr[tid];
+	d_signal[tid] = ival*dev_A[tid];
 }
 
 /**
@@ -711,19 +711,18 @@ static __global__ void loadIntToDoubleIBDWT(double *dArr, int *iArr, int *iHiArr
  */
 // Error version assigns the round-off error back to errorvals[tid]
 template <int error_flag>
-static __global__ void invDWTproductMinus2(int64_t *llintArr, double *signal, double *a_inv, float *errorvals, int size) {
-
+static __global__ void invDWTproductMinus2(int64_t *llint_signal, double *d_signal, double *dev_Ainv, float *dev_errArr) {
 	const int tid = blockIdx.x*blockDim.x + threadIdx.x;
 
 	double sig;
 	if (tid == 0)
-		sig = signal[tid]*a_inv[tid] - 2.0;
+		sig = d_signal[tid]*dev_Ainv[tid] - 2.0;
 	else
-		sig = signal[tid]*a_inv[tid];
+		sig = d_signal[tid]*dev_Ainv[tid];
 
-	llintArr[tid] = double2ll(sig, cudaRoundNearest);
+	llint_signal[tid] = double2ll(sig, cudaRoundNearest);
 	if (error_flag) {
-		errorvals[tid] = (float) fabs(sig - llrint(sig));
+		dev_errArr[tid] = (float) fabs(sig - llrint(sig));
 	}
 }
 
@@ -731,13 +730,13 @@ static __global__ void invDWTproductMinus2(int64_t *llintArr, double *signal, do
  * uses Xfer to host and then sequential max check on array from errorVector computed above
  *   called seldom (currently, every 1/50 of the total iterations), so no effect on runtime.
  */
-static __host__ float findMaxErrorHOST(float *dev_fltArr, float *host_temp, int len) {
+static __host__ float findMaxErrorHOST(float *dev_errArr, float *host_errArr, int signalSize) {
 
-	cutilSafeCall(cudaMemcpy(host_temp, dev_fltArr, sizeof(float)*len, cudaMemcpyDeviceToHost));
+	cutilSafeCall(cudaMemcpy(host_errArr, dev_errArr, sizeof(float)*signalSize, cudaMemcpyDeviceToHost));
 	float maxVal = 0.0f;
-	for (int i = 0; i < len; i++)
-		if (host_temp[i] > maxVal)
-			maxVal = host_temp[i];
+	for (int i = 0; i < signalSize; i++)
+		if (host_errArr[i] > maxVal)
+			maxVal = host_errArr[i];
 	return maxVal;
 }
 
@@ -746,9 +745,9 @@ static __host__ float findMaxErrorHOST(float *dev_fltArr, float *host_temp, int 
  *function returns list of number of significant bits of a list of int64_ts
  *AS IS, list can only be as long as however many strings you can launch, now 67,107,840 on 2.0 gpus
  */
-static __global__ void computeMaxBitVector(float *dev_errArr, int64_t *llint_signal, int len){
+static __global__ void computeMaxBitVector(float *dev_errArr, int64_t *llint_signal, int signalSize){
 	int tid = threadIdx.x + blockIdx.x*blockDim.x;
-	if (tid < len){
+	if (tid < signalSize){
 		if (llint_signal[tid] >= 0){
 			dev_errArr[tid] = (float) __clzll(llint_signal[tid]);
 		}
@@ -799,11 +798,11 @@ static __host__ float mersenneIter() {
 
 	// Every so often, we do some error checking.
 	if (check_error) {
-		invDWTproductMinus2<1><<<numBlocks, T_PER_B>>>(llint_signal, d_signal, dev_Ainv, dev_errArr, signalSize);
+		invDWTproductMinus2<1><<<numBlocks, T_PER_B>>>(llint_signal, d_signal, dev_Ainv, dev_errArr);
 		// do error calculation in the function that calls us, since we don't need to touch dev_errArr any more in this function
 		// error = findMaxErrorHOST(dev_errArr, host_errArr, signalSize);
 	} else {
-		invDWTproductMinus2<0><<<numBlocks, T_PER_B>>>(llint_signal, d_signal, dev_Ainv, dev_errArr, signalSize);
+		invDWTproductMinus2<0><<<numBlocks, T_PER_B>>>(llint_signal, d_signal, dev_Ainv, dev_errArr);
 	}
 
 	cutilCheckMsg("Kernel execution failed [ invDWTproductMinus2 ]");
@@ -988,7 +987,7 @@ restart_findSignalSize:
 
 						// load the int array to the doubles for FFT
 						// This is already balanced, and already multiplied by a_0 = 1 for DWT
-						loadValue4ToFFTarray<<<numBlocks, T_PER_B>>>(d_signal, signalSize);
+						loadValue4ToFFTarray<<<numBlocks, T_PER_B>>>(d_signal);
 						cutilCheckMsg("Kernel execution failed [ loadValue4ToFFTarray ]");
 					
 						int iter = 0;
@@ -1092,7 +1091,7 @@ static __host__ float errorTrial(unsigned int testIterations) {
 
 	// load the int array to the doubles for FFT
 	// This is already balanced, and already multiplied by a_0 = 1 for DWT
-	loadValue4ToFFTarray<<<numBlocks, T_PER_B>>>(d_signal, signalSize);
+	loadValue4ToFFTarray<<<numBlocks, T_PER_B>>>(d_signal);
 	cutilCheckMsg("Kernel execution failed [ loadValue4ToFFTarray ]");
 
 	float totalTime = 0;
@@ -1233,7 +1232,7 @@ static __host__ void mersenneTest(Real *cp_signal) {
 		
 		// load the int array to the doubles for FFT
 		// This is already balanced, and already multiplied by a_0 = 1 for DWT
-		loadValue4ToFFTarray<<<numBlocks, T_PER_B>>>(d_signal, signalSize);
+		loadValue4ToFFTarray<<<numBlocks, T_PER_B>>>(d_signal);
 		cutilCheckMsg("Kernel execution failed [ loadValue4ToFFTarray ]");
 	}
 

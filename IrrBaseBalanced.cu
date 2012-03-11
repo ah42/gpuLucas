@@ -50,7 +50,7 @@
  * @template-param number - number of subsequent digits to distribute product bits
  */
 template <int number>
-static __global__ void llintToIrrBal(int *iArr, int *hiArr, int64_t *lliArr, unsigned char *bperW8arr, const int size) {
+static __global__ void llintToIrrBal(int *i_signalOUT, int *i_hiBitArr, int64_t *llint_signal, unsigned char *bitsPerWord8, const int signalSize) {
 	const int tid = blockIdx.x*blockDim.x + threadIdx.x;
 	const int tba = threadIdx.x; // thread block address for digits index
 
@@ -64,14 +64,14 @@ static __global__ void llintToIrrBal(int *iArr, int *hiArr, int64_t *lliArr, uns
 	if (tba < number) {
 		int offset = tid;
 		if (tid < number)
-			offset += size;
-		signs[tba] = lliArr[offset - number] < 0 ? -1 : 1;
-		digits[tba]= lliArr[offset - number] * signs[tba];
+			offset += signalSize;
+		signs[tba] = llint_signal[offset - number] < 0 ? -1 : 1;
+		digits[tba]= llint_signal[offset - number] * signs[tba];
 	}
 
-	signs[tba + number] = lliArr[tid] < 0 ? -1 : 1;
-	digits[tba + number] = lliArr[tid] * signs[tba + number]; 
-	unsigned char bperW8 = bperW8arr[tid];
+	signs[tba + number] = llint_signal[tid] < 0 ? -1 : 1;
+	digits[tba + number] = llint_signal[tid] * signs[tba + number]; 
+	unsigned char bperW8 = bitsPerWord8[tid];
 
 	// get info for this digit
 	int isHi = bperW8 & 1;
@@ -105,8 +105,8 @@ static __global__ void llintToIrrBal(int *iArr, int *hiArr, int64_t *lliArr, uns
 	else if (sum >= baseOver2)
 		hival = (sum + baseOver2) >> BITS; // /myBase;
 
-	iArr[tid] = sum - (hival << BITS);
-	hiArr[tid] = hival;
+	i_signalOUT[tid] = sum - (hival << BITS);
+	i_hiBitArr[tid] = hival;
 }
 
 /**
@@ -114,14 +114,14 @@ static __global__ void llintToIrrBal(int *iArr, int *hiArr, int64_t *lliArr, uns
  *    current digit.  Don't rebalance if exceeds max or min on balanced
  *    representation.
  */
-static __global__ void addPseudoBalanced(int *signal, int *hiAdd, int size) {
+static __global__ void addPseudoBalanced(int *i_signalOUT, int *i_hiBitArr, int signalSize) {
 
 	const int tid = blockIdx.x*blockDim.x + threadIdx.x;
 
 	if (tid == 0) 
-		signal[tid] += hiAdd[size - 1];
+		i_signalOUT[tid] += i_hiBitArr[signalSize - 1];
 	else
-		signal[tid] += hiAdd[tid - 1];
+		i_signalOUT[tid] += i_hiBitArr[tid - 1];
 }
 
 /**
@@ -130,16 +130,16 @@ static __global__ void addPseudoBalanced(int *signal, int *hiAdd, int size) {
  *   done CPU-side.
  */
 // FIXME: -aaron: This is very slow, and costs .5 seconds on each call (every checkpoint)
-static __global__ void rebalanceIrrIntSEQGPU(int *signal, unsigned char *bpwArr, int size) {
+static __global__ void rebalanceIrrIntSEQGPU(int *i_signalOUT, unsigned char *bitsPerWord8, int signalSize) {
 
 	int carryOut = 0;
 	int tBase, tBaseOver2;
 	int BASE_HIOVER2 = BASE_HI >> 1;
 	int BASE_LOOVER2 = BASE_LO >> 1;
 #pragma unroll 128
-	for (int i = 0; i < size; i++) {
+	for (int i = 0; i < signalSize; i++) {
 
-		if (bpwArr[i] & 1) {
+		if (bitsPerWord8[i] & 1) {
 			tBase = BASE_HI;
 			tBaseOver2 = BASE_HIOVER2;
 		}
@@ -147,25 +147,25 @@ static __global__ void rebalanceIrrIntSEQGPU(int *signal, unsigned char *bpwArr,
 			tBase = BASE_LO;
 			tBaseOver2 = BASE_LOOVER2;
 		}
-		int b = signal[i];
+		int b = i_signalOUT[i];
 
 		int total = b + carryOut;
 
 		if (total >= tBaseOver2) {
-			signal[i] = total - tBase;
+			i_signalOUT[i] = total - tBase;
 			carryOut = 1;
 		}
 		else if (total < -tBaseOver2) {
-			signal[i] = total + tBase;
+			i_signalOUT[i] = total + tBase;
 			carryOut = -1;
 		}
 		else {
-			signal[i] = total;
+			i_signalOUT[i] = total;
 			carryOut = 0;
 		}
 	}
 	if (carryOut != 0)
-		signal[0] += carryOut;
+		i_signalOUT[0] += carryOut;
 }
 
 #endif // #ifndef D_IRRBASEBALANCED
