@@ -542,27 +542,32 @@ int main(int argc, char* argv[]) {
 	} else
 		printf("\nError trial completed successfully.\n");
 
-	char buf[16];
+	char buf[64];
 	printFriendlyTime(buf, (elapsedMsecDEV*testPrime)/1000);
 
 	if (!opt_quiet) {
 		printf("\nTiming:  To test M%d"
 				"\n  elapsed time :      %10d msec = %.1f sec"
 				"\n  dev. elapsed time:  %10d msec = %d sec"
-				"\n  est. total time:    %10s\n",
+				"\n  est. total time:    %15s",
 				testPrime,
 				(int)elapsedMsec, elapsedMsec/1000,
 				(int)(elapsedMsecDEV*trialFraction), (int)(elapsedMsecDEV*trialFraction/1000),
 				buf);
-
-		printf("\nBeginning full test of M%d\n\n", testPrime);
 	} else
-		printf("\n  est. total time:\t%10s\n\n",
+		printf("\n  est. total time:\t%10s",
 				buf);
+
+	time_t eta_time = (elapsedMsecDEV*(testPrime-resume_iter))/1000.0 + time(NULL);    // eta relative to 'now'
+	strftime(buf, 64, "%A %c", localtime(&eta_time));
+	printf(" = %s\n", buf);
+
 
 	if (resuming) {
 		printf("\nResuming full test of M%d at iteration %d (%2.1f%%)\n\n", testPrime, resume_iter, 100.0f * (float)resume_iter / (float)testPrime);
 		iter = resume_iter;
+	} else {
+		printf("\nBeginning full test of M%d\n\n", testPrime);
 	}
 
 	// prepare graceful-exit signal handler
@@ -1300,7 +1305,7 @@ static __host__ void mersenneTest(Real *cp_signal) {
 				float iter_time = elapsedMsec / (iter - last_cp_iter);
 
 				// calculate ETA in seconds
-				int eta_diff = iter_time * (testPrime - iter) / 1000; // eta in seconds
+				int eta_diff = iter_time * (float) (testPrime - iter) / 1000.0f;
 
 				// Reset timer
 				last_cp_iter = iter;
