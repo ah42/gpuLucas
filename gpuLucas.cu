@@ -185,6 +185,8 @@ char program_name[] = "gpuLucas";
 char program_version[] = "0.9.2";
 unsigned int iter = 0;
 unsigned int signalSize = 0, testPrime = 0;
+int numBlocks = 0, numFFTblocks = 0;
+
 volatile int do_gracefulExit = 0;
 
 int resuming = 0;
@@ -760,9 +762,6 @@ static __global__ void computeMaxBitVector(float *dev_errArr, int64_t *llint_sig
 
 template <int check_error, int timing>
 static __host__ float mersenneIter() {
-	// We assume throughout that signalSize is divisible by T_PER_B
-	const int numBlocks = signalSize/T_PER_B;
-	const int numFFTblocks = (signalSize/2 + 1)/T_PER_B + 1; 
 	cudaEvent_t start, stop;
 	float elapsedTime, totalTime=0;
 
@@ -975,7 +974,8 @@ restart_findSignalSize:
 					if ((signalSize64 <= (unsigned int)max_nx) & (signalSize64 >= (unsigned int)min_nx) & (signalSize64 % T_PER_B == 0)) {
 						maxerr = 0;
 						signalSize = signalSize64;
-						int numBlocks = signalSize/T_PER_B;
+						numBlocks = signalSize/T_PER_B;
+						numFFTblocks = (signalSize/2 + 1)/T_PER_B + 1;
 						setSliceAndDice();
 						initConstantSymbols();
  
@@ -1051,10 +1051,6 @@ restart_findSignalSize:
 * errorTrial()
 */
 static __host__ float errorTrial(unsigned int testIterations) {
-
-	// We assume throughout that signalSize is divisible by T_PER_B
-	const int numBlocks = signalSize/T_PER_B;
-
 	// Run at least 100 testIterations. We'll encounter a floating point error later on if we don't
 	// main() calls us with at least 100 iterations already, so this shouldn't happen
 	if (testIterations<100)
@@ -1085,6 +1081,9 @@ static __host__ float errorTrial(unsigned int testIterations) {
 		for (int i = 0; i < 20; i++) 
 			printf("ainv[%d] = %f\n", i, h_Ainv[i]);
 	}
+
+	numBlocks = signalSize/T_PER_B;
+	numFFTblocks = (signalSize/2 + 1)/T_PER_B + 1;
 
 	// load the int array to the doubles for FFT
 	// This is already balanced, and already multiplied by a_0 = 1 for DWT
@@ -1218,10 +1217,6 @@ static __host__ void print_residue(int *h_signalOUT) {
 *   time through loop
 */
 static __host__ void mersenneTest(Real *cp_signal) {
-
-	// We assume throughout that signalSize is divisible by T_PER_B
-	const int numBlocks = signalSize/T_PER_B;
-
 	mallocArrays();
 
 	if (resuming) {
@@ -1257,6 +1252,9 @@ static __host__ void mersenneTest(Real *cp_signal) {
 	sigaddset(&x, SIGQUIT);
 	sigaddset(&x, SIGTERM);
 	sigaddset(&x, SIGTSTP);
+
+	numBlocks = signalSize/T_PER_B;
+	numFFTblocks = (signalSize/2 + 1)/T_PER_B + 1;
 
 	// Loop M-2 times
 	for (; iter < testPrime; iter++) {
