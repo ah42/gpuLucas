@@ -62,22 +62,15 @@ static __global__ void llintToIrrBal(int *iArr, int *hiArr, int64_t *lliArr, uns
 	//   Be carefule to wrap-around from end of array if tid < n
 	//   otherwise, load end of previous block at [tid - n]
 	if (tba < number) {
-     	int offset;
-		if (tid - number < 0) 
-			offset = size + tid;
-		else
-			offset = tid;
-		digits[tba] = lliArr[offset - number];
-		signs[tba] = digits[tba] < 0 ? -1 : 1;
-		digits[tba] *= signs[tba];
+		int offset = tid;
+		if (tid < number)
+			offset += size;
+		signs[tba] = lliArr[offset - number] < 0 ? -1 : 1;
+		digits[tba]= lliArr[offset - number] * signs[tba];
 	}
 
-	digits[tba + number] = lliArr[tid];
-	signs[tba + number] = digits[tba + number] < 0 ? -1 : 1;
-	digits[tba + number] *= signs[tba + number]; 
-	
-	__syncthreads();
-	
+	signs[tba + number] = lliArr[tid] < 0 ? -1 : 1;
+	digits[tba + number] = lliArr[tid] * signs[tba + number]; 
 	unsigned char bperW8 = bperW8arr[tid];
 
 	// get info for this digit
@@ -85,54 +78,28 @@ static __global__ void llintToIrrBal(int *iArr, int *hiArr, int64_t *lliArr, uns
 	int BITS = LO_BITS + isHi;
 	int myBase = BASE_LO << isHi;
 	int myMask = myBase - 1;
+	int baseOver2 = myBase >> 1;
+	int hival = 0;
+
+	__syncthreads();
 
 	// Walk backwards through the cached long longs, pulling off
 	//   higher and higher order bits, all of length myMask for the
 	//   current digit.
-	// sbitN is amount to shift word (tid - N) before pulling off
+	// shiftBits is amount to shift word (tid - N) before pulling off
 	//   higher order bits with myMask for current digit
-	int sbits1, sbits2, sbits3, sbits4, sbits5, sbits6;
-	if (number >= 1) 
-		sbits1 =          LO_BITS + ((bperW8 >> 1) & 1);
-	if (number >= 2) 
-		sbits2 = sbits1 + LO_BITS + ((bperW8 >> 2) & 1);
-	if (number >= 3) 
-		sbits3 = sbits2 + LO_BITS + ((bperW8 >> 3) & 1);
-	if (number >= 4) 
-		sbits4 = sbits3 + LO_BITS + ((bperW8 >> 4) & 1);
-	if (number >= 5) 
-		sbits5 = sbits4 + LO_BITS + ((bperW8 >> 5) & 1);
-	if (number >= 6) 
-		sbits6 = sbits5 + LO_BITS + ((bperW8 >> 6) & 1);
 
-	int sum = signs[tba + number]*(digits[tba + number]              & myMask);
-	if(number >= 1)
-		sum += signs[tba + number - 1]*((digits[tba + number - 1] >> sbits1) & myMask);
-	if(number >= 2)
-		sum += signs[tba + number - 2]*((digits[tba + number - 2] >> sbits2) & myMask);
-	if(number >= 3)
-		sum += signs[tba + number - 3]*((digits[tba + number - 3] >> sbits3) & myMask);
-	if(number >= 4)
-		sum += signs[tba + number - 4]*((digits[tba + number - 4] >> sbits4) & myMask);
-	if(number >= 5)
-		sum += signs[tba + number - 5]*((digits[tba + number - 5] >> sbits5) & myMask);
-	if(number >= 6)
-		sum += signs[tba + number - 6]*((digits[tba + number - 6] >> sbits6) & myMask);
-
-  /* OLD VERSION.  above really doesn't buy much.  below is simpler,
-        but not templated.
+	int sum = signs[tba + number]*(digits[tba + number] & myMask);
   	int shiftBits = 0;
-	for (int i = 1; i < 6 + 1; i++) {
-		bperW8 >>= 1;
-		isHi = bperW8 & 1;
-		shiftBits += LO_BITS + isHi;
-		sum += signs[tba + 6 - i]*((digits[tba + 6 - i] >> shiftBits) &  myMask);
+
+	// compiler will unroll this loop by templated number
+#pragma unroll
+	for (int i = 1; i <= number; i++) {
+		shiftBits += LO_BITS + ((bperW8 >> i) & 1);
+		sum += signs[tba + number - i]*((digits[tba + number - i] >> shiftBits) &  myMask);
 	}
-    */
 
 	// do pseudo-rebalance, storing borrow or carry to hiArr[tid]
-	int baseOver2 = myBase >> 1;
-	int hival = 0;
 	if (sum < -baseOver2)
 		hival = -((-sum + baseOver2) >> BITS); //  /myBase);
 	else if (sum >= baseOver2)
@@ -169,7 +136,7 @@ static __global__ void rebalanceIrrIntSEQGPU(int *signal, unsigned char *bpwArr,
 	int tBase, tBaseOver2;
 	int BASE_HIOVER2 = BASE_HI >> 1;
 	int BASE_LOOVER2 = BASE_LO >> 1;
-
+#pragma unroll 128
 	for (int i = 0; i < size; i++) {
 
 		if (bpwArr[i] & 1) {
