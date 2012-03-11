@@ -168,7 +168,7 @@ const int T_PER_B = 512;
 #define MAX_7 8  // 5764801
 
 // This determines the maximum allowable roundoff error
-#define ERROR_LIMIT 0.35f
+#define ERROR_LIMIT 0.30f
 
 // At runtime, set constant and load to GPU for use in IrrBaseBalanced.cu code
 int h_LO_BITS;
@@ -806,7 +806,7 @@ static __host__ float mersenneIter() {
 
 	if (timing) {
 		float maxerr = findMaxErrorHOST(dev_errArr, host_errArr, signalSize);
-		if (maxerr >= 0.5f) {
+		if (maxerr >= ERROR_LIMIT) {
 			if (opt_verbose)
 				printf("max abs error = %f, is too high. Exiting\n", maxerr);
 			return -1;
@@ -1232,7 +1232,7 @@ static __host__ void mersenneTest(Real *cp_signal) {
 		cutilCheckMsg("Kernel execution failed [ loadValue4ToFFTarray ]");
 	}
 
-	// float maxerr = 0.0f;
+	float maxerr = 0.0f;
 
 
 	unsigned int last_cp_iter = iter;
@@ -1261,8 +1261,11 @@ static __host__ void mersenneTest(Real *cp_signal) {
 		// Every so often, do some error checking. Do this at every checkpoint as well
 		if (unlikely((iter % (testPrime/1000) == 0) | (iter % checkpoint_freq == 1))) {
 			mersenneIter<1, 0>();
-			// maxerr = findMaxErrorHOST(dev_errArr, host_errArr, signalSize);
+			maxerr = findMaxErrorHOST(dev_errArr, host_errArr, signalSize);
 			// FIXME: -Aaron: we should add a way to stop/restart if the error is too high.
+			if (unlikely(maxerr >= ERROR_LIMIT)) {
+				printf("\n\n\nError limit exceeded: %f >= %f\n\n\n", maxerr, ERROR_LIMIT);
+			}
 		} else {
 			mersenneIter<0, 0>();
 		}
