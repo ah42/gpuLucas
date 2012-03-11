@@ -43,7 +43,7 @@ inline void __cudaSafeCallNoSync( cudaError err, const char *file, const int lin
 }
 
 inline void __cudaSafeCall( cudaError err, const char *file, const int line ) {
-	if( cudaSuccess != err) {
+	if(unlikely( cudaSuccess != err)) {
 		fprintf(stderr, "%s(%i) : cudaSafeCall() Runtime API error %d: %s.\n",
 				file, line, (int)err, cudaGetErrorString( err ) );
 		exit(-1);
@@ -69,7 +69,7 @@ inline void __cutilCheckError( bool err, const char *file, const int line ) {
 
 inline void __cutilGetLastError( const char *errorMessage, const char *file, const int line ) {
     cudaError_t err = cudaGetLastError();
-    if( cudaSuccess != err) {
+    if(unlikely( cudaSuccess != err)) {
         fprintf(stderr, "%s(%i) : cutilCheckMsg() CUTIL CUDA error : %s : (%d) %s.\n",
                 file, line, errorMessage, (int)err, cudaGetErrorString( err ) ); 
         exit(-1);
@@ -78,7 +78,7 @@ inline void __cutilGetLastError( const char *errorMessage, const char *file, con
 
 #ifdef _CUFFT_H_
 inline void __cufftSafeCall( cufftResult err, const char *file, const int line ) {
-	if( CUFFT_SUCCESS != err) {
+	if(unlikely( CUFFT_SUCCESS != err)) {
 		fprintf(stderr, "%s(%i) : cufftSafeCall() CUFFT error %d: ",
 				file, line, (int)err);
 		switch (err) {
