@@ -625,7 +625,7 @@ static __global__ void ComplexPointwiseSqr(Complex* z_signal, int size) {
 	if (tid < size) {
 		temp = z_signal[tid];
 		c.y = 2.0*temp.x*temp.y;
-		//c.x = (temp.x + temp.y)*(temp.x - temp.y);  xxAT ??
+		//c.x = (temp.x + temp.y)*(temp.x - temp.y);  xxAT ?? -- we are too memory bound for this to make a difference
 		c.x = temp.x*temp.x - temp.y*temp.y;
 		z_signal[tid] = c;
 	}
@@ -682,14 +682,14 @@ static __host__ void computeBitsPerWordVectors(unsigned char *bitsPerWord8, int 
 
 // load values of int array into double array for FFT.  Low-order 2 bytes go in lowest numbered
 //     position in dArr
-static __global__ void loadValue4ToFFTarray(double *dev_A) {
+static __global__ void loadValue4ToFFTarray(double *d_signal) {
 
 	const int tid = blockIdx.x*blockDim.x + threadIdx.x;
 
 	if (tid == 0)
-		dev_A[tid] = 4.0;
+		d_signal[tid] = 4.0;
 	else
-		dev_A[tid] = 0.0;
+		d_signal[tid] = 0.0;
 }
 
 
