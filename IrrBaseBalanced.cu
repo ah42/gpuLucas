@@ -56,7 +56,7 @@ static __global__ void llintToIrrBal(int *i_signalOUT, int *i_hiBitArr, int64_t 
 
 	// Use int for each element, the radix place and its n preceeding
 	__shared__ int64_t digits[T_PER_B + number];
-	__shared__ int signs[T_PER_B + number];
+	__shared__ int8_t signs[T_PER_B + number];
 	
 	// first n threads of block initialize leading digits.
 	//   Be carefule to wrap-around from end of array if tid < n
