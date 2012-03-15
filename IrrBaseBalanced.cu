@@ -50,7 +50,7 @@
  * @template-param number - number of subsequent digits to distribute product bits
  */
 template <int number>
-static __global__ void llintToIrrBal(int *i_signalOUT, int8_t *i_hiBitArr, int64_t *llint_signal, uint8_t *bitsPerWord8, const int signalSize) {
+static __global__ void llintToIrrBal(int *i_signalOUT, int8_t *i_hiBitArr, const int64_t *llint_signal, const uint8_t *bitsPerWord8, const int signalSize) {
 	const int tid = blockIdx.x*blockDim.x + threadIdx.x;
 	const int tba = threadIdx.x; // thread block address for digits index
 

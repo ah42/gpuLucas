@@ -253,9 +253,9 @@ static cufftHandle plan1, plan2;
  *   but give an overview of the functions so left it.
  */
 
-static __global__ void ComplexPointwiseSqr(Complex* z_signal, int signalSize);
+static __global__ void ComplexPointwiseSqr(Complex* z_signal, const int signalSize);
 static __global__ void loadValue4ToFFTarray(double *d_signal);
-static __global__ void loadIntToDoubleIBDWT(double *d_signal, int *i_signalOUT, int8_t *i_hiBitArr, double *dev_A, int signalSize);
+static __global__ void loadIntToDoubleIBDWT(double *d_signal, const int *i_signalOUT, const int8_t *i_hiBitArr, const double *dev_A, const int signalSize);
 
 /*
  * In bitsPerWord, we use a bit-vector:
@@ -285,7 +285,7 @@ static __host__ void computeWeightVectors(double *host_A, double *host_Ainv, int
  *   and subtracts 2 from signal[0], requiring no carry in current weighted carry-save state
  */
 template <int error>
-static __global__ void invDWTproductMinus2(int64_t *llint_signal, double *d_signal, double *dev_Ainv, float *dev_errArr);
+static __global__ void invDWTproductMinus2(int64_t *llint_signal, const double *d_signal, const double *dev_Ainv, float *dev_errArr);
 
 
 /**
@@ -303,7 +303,7 @@ static __global__ void invDWTproductMinus2(int64_t *llint_signal, double *d_sign
  * Use llintToIrrBal<2,3,4,5,6>, as appropriate.  And yes, we can have pointers
  *   to global kernels.  (Works fine, just address.)
  */
-void (*sliceAndDice)(int *iArr, int8_t *hiArr, int64_t *lliArr, uint8_t *bperW8arr, const int size);
+void (*sliceAndDice)(int *iArr, int8_t *hiArr, const int64_t *lliArr, const uint8_t *bperW8arr, const int size);
 
 /**
  * For n = 2 to 6. This uses templated kernel functions for the different lengths,
@@ -695,7 +695,7 @@ static __global__ void loadValue4ToFFTarray(double *d_signal) {
 
 
 // This includes pseudobalance by adding hi order terms from last rebalancing.
-static __global__ void loadIntToDoubleIBDWT(double *d_signal, int *i_signalOUT, int8_t *i_hiBitArr, double *dev_A, int signalSize) {
+static __global__ void loadIntToDoubleIBDWT(double *d_signal, const int *i_signalOUT, const int8_t *i_hiBitArr, const double *dev_A, const int signalSize) {
 
 	const int tid = blockIdx.x*blockDim.x + threadIdx.x;
 	
@@ -712,7 +712,7 @@ static __global__ void loadIntToDoubleIBDWT(double *d_signal, int *i_signalOUT, 
  */
 // Error version assigns the round-off error back to errorvals[tid]
 template <int error_flag>
-static __global__ void invDWTproductMinus2(int64_t *llint_signal, double *d_signal, double *dev_Ainv, float *dev_errArr) {
+static __global__ void invDWTproductMinus2(int64_t *llint_signal, const double *d_signal, const double *dev_Ainv, float *dev_errArr) {
 	const int tid = blockIdx.x*blockDim.x + threadIdx.x;
 
 	double sig;
