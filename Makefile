@@ -8,7 +8,7 @@ NVCC_ARCHES += -gencode arch=compute_20,code=compute_20 -gencode arch=compute_13
 
 OPT = -O3
 CFLAGS = $(OPT) -Wall
-NVCC_FLAGS = $(OPT) -use_fast_math $(NVCC_ARCHES) --compiler-options="$(CFLAGS) -fno-strict-aliasing" --ptxas-options=-v --maxrregcount 20
+NVCC_FLAGS = $(OPT) -use_fast_math $(NVCC_ARCHES) --compiler-options="$(CFLAGS) -fno-strict-aliasing" --ptxas-options=-v
 
 all: gpuLucas
 

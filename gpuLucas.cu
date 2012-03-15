@@ -158,7 +158,11 @@
 
 // NOTE: testPrimes below 9689 generate runlengths < 1024, which breaks the code if T_PER_B = 1024
 // Create ThreadsPerBlock constant
-const int T_PER_B = 512;
+const int T_PER_B = 256;
+
+// These determines how many elements we compute per thread
+// It changes the block dimensions from T_PER_B to T_PER_B/UNROLL_KERNEL
+#define UNROLL_KERNEL 2
 
 // These determine the highest FFT signalSize we will check in findSignalSize()
 // where signalSize == 2^MAX_2 * 3^MAX_3 * 5^MAX_5 * 7^MAX_7
@@ -621,14 +625,22 @@ int main(int argc, char* argv[]) {
 
 // Complex pointwise multiplication
 static __global__ void ComplexPointwiseSqr(Complex* z_signal, int size) {
-	Complex c, temp;
-	const int tid = blockIdx.x*blockDim.x + threadIdx.x;
-	if (tid < size) {
-		temp = z_signal[tid];
-		c.y = 2.0*temp.x*temp.y;
-		//c.x = (temp.x + temp.y)*(temp.x - temp.y);  xxAT ?? -- we are too memory bound for this to make a difference
-		c.x = temp.x*temp.x - temp.y*temp.y;
-		z_signal[tid] = c;
+	const int tid = UNROLL_KERNEL * blockIdx.x*blockDim.x + threadIdx.x;
+	
+	Complex temp[UNROLL_KERNEL];
+	
+#pragma unroll
+	for (int i=0; i<UNROLL_KERNEL; i++) {
+		temp[i] = z_signal[tid + i*blockDim.x];
+	}
+	
+#pragma unroll
+	for (int i=0; i<UNROLL_KERNEL; i++) {
+		if (tid + i*blockDim.x < size) {
+			// We are too memory-bound for any specific multiplication method to make much difference
+			// Use cuCmul from cuComplex.h for simplicity's sake
+			z_signal[tid + i*blockDim.x] = cuCmul(temp[i], temp[i]);
+		}
 	}
 } 
 
@@ -696,13 +708,39 @@ static __global__ void loadValue4ToFFTarray(double *d_signal) {
 
 // This includes pseudobalance by adding hi order terms from last rebalancing.
 static __global__ void loadIntToDoubleIBDWT(double *d_signal, const int *i_signalOUT, const int8_t *i_hiBitArr, const double *dev_A, const int signalSize) {
-
-	const int tid = blockIdx.x*blockDim.x + threadIdx.x;
+	const int tid = UNROLL_KERNEL * blockIdx.x*blockDim.x + threadIdx.x;
 	
-	int ival = i_signalOUT[tid];
-	ival += (tid == 0 ? i_hiBitArr[signalSize - 1] : i_hiBitArr[tid - 1]);
+	int ival[UNROLL_KERNEL*2];
+	double dval[UNROLL_KERNEL];
+	
+#pragma unroll
+	for (int i=0; i<UNROLL_KERNEL; i++) {
+		ival[i] = i_hiBitArr[tid  + i*blockDim.x -1];
+	}
+	
+	if (tid == 0)
+		ival[0] = i_hiBitArr[signalSize - 1];
+	
+#pragma unroll
+	for (int i=0; i<UNROLL_KERNEL; i++) {
+		ival[i+UNROLL_KERNEL] = i_signalOUT[tid + i*blockDim.x];
+		dval[i] = dev_A[tid + i*blockDim.x];
+	}
 
-	d_signal[tid] = ival*dev_A[tid];
+#pragma unroll
+	for (int i=0; i<UNROLL_KERNEL; i++) {
+		ival[i] += ival[i+UNROLL_KERNEL];
+	}
+	
+#pragma unroll
+	for (int i=0; i<UNROLL_KERNEL; i++) {
+		dval[i] *= (double)ival[i];
+	}
+	
+#pragma unroll
+	for (int i=0; i<UNROLL_KERNEL; i++) {
+		d_signal[tid + i*blockDim.x] = dval[i];
+	}
 }
 
 /**
@@ -713,17 +751,34 @@ static __global__ void loadIntToDoubleIBDWT(double *d_signal, const int *i_signa
 // Error version assigns the round-off error back to errorvals[tid]
 template <int error_flag>
 static __global__ void invDWTproductMinus2(int64_t *llint_signal, const double *d_signal, const double *dev_Ainv, float *dev_errArr) {
-	const int tid = blockIdx.x*blockDim.x + threadIdx.x;
-
-	double sig;
+	const int tid = UNROLL_KERNEL * blockIdx.x * blockDim.x + threadIdx.x;
+	
+	double2 sig[UNROLL_KERNEL];
+	
+#pragma unroll
+	for (int i=0; i<UNROLL_KERNEL; i++) {
+		sig[i].x = d_signal[tid + i*blockDim.x];
+		sig[i].y = dev_Ainv[tid + i*blockDim.x];
+	}
+	
+#pragma unroll
+	for (int i=0; i<UNROLL_KERNEL; i++) {
+		sig[i].x *= sig[i].y;
+	}
+	
 	if (tid == 0)
-		sig = d_signal[tid]*dev_Ainv[tid] - 2.0;
-	else
-		sig = d_signal[tid]*dev_Ainv[tid];
-
-	llint_signal[tid] = double2ll(sig, cudaRoundNearest);
+		sig[0].x -= 2.0;
+	
+#pragma unroll
+	for (int i=0; i<UNROLL_KERNEL; i++) {
+		llint_signal[tid + i*blockDim.x] = __double2ll_rn(sig[i].x);
+	}
+	
 	if (error_flag) {
-		dev_errArr[tid] = (float) fabs(sig - llrint(sig));
+#pragma unroll
+		for (int i=0; i<UNROLL_KERNEL; i++) {
+			dev_errArr[tid + i*blockDim.x] = (float) fabs(sig[i].x - llrint(sig[i].x));
+		}
 	}
 }
 
@@ -781,7 +836,7 @@ static __host__ float mersenneIter() {
 	cutilCheckMsg("Kernel execution failed [ CUFFT_EXECFORWARD ]");
 	
 	// Multiply the coefficients componentwise
-	ComplexPointwiseSqr<<<numFFTblocks, T_PER_B>>>(z_signal, signalSize/2 + 1);
+	ComplexPointwiseSqr<<<numFFTblocks, T_PER_B/UNROLL_KERNEL>>>(z_signal, signalSize/2 + 1);
 	cutilCheckMsg("Kernel execution failed [ ComplexPointwiseSqr ]");
 	
 	// Transform signal back
@@ -799,11 +854,11 @@ static __host__ float mersenneIter() {
 
 	// Every so often, we do some error checking.
 	if (check_error) {
-		invDWTproductMinus2<1><<<numBlocks, T_PER_B>>>(llint_signal, d_signal, dev_Ainv, dev_errArr);
+		invDWTproductMinus2<1><<<numBlocks, T_PER_B/UNROLL_KERNEL>>>(llint_signal, d_signal, dev_Ainv, dev_errArr);
 		// do error calculation in the function that calls us, since we don't need to touch dev_errArr any more in this function
 		// error = findMaxErrorHOST(dev_errArr, host_errArr, signalSize);
 	} else {
-		invDWTproductMinus2<0><<<numBlocks, T_PER_B>>>(llint_signal, d_signal, dev_Ainv, dev_errArr);
+		invDWTproductMinus2<0><<<numBlocks, T_PER_B/UNROLL_KERNEL>>>(llint_signal, d_signal, dev_Ainv, dev_errArr);
 	}
 
 	cutilCheckMsg("Kernel execution failed [ invDWTproductMinus2 ]");
@@ -834,7 +889,7 @@ static __host__ float mersenneIter() {
 	sliceAndDice<<<numBlocks, T_PER_B>>>(i_signalOUT, i_hiBitArr, llint_signal, bitsPerWord8, signalSize);
 	cutilCheckMsg("Kernel execution failed [ sliceAndDice ]");
 
-	loadIntToDoubleIBDWT<<<numBlocks, T_PER_B>>>(d_signal, i_signalOUT, i_hiBitArr, dev_A, signalSize);
+	loadIntToDoubleIBDWT<<<numBlocks, T_PER_B/UNROLL_KERNEL>>>(d_signal, i_signalOUT, i_hiBitArr, dev_A, signalSize);
 	cutilCheckMsg("Kernel execution failed [ loadIntToDoubleIBDWT ]");
 
 	if (timing) {
