@@ -1379,15 +1379,17 @@ static __host__ void mersenneTest(Real *cp_signal) {
 				cutilSafeCall(cudaEventRecord(cp_start, 0)); 
 				cutilSafeCall(cudaEventSynchronize(cp_start));
 
-				// Display current iteration's residue and error
-				addPseudoBalanced<<<numBlocks, T_PER_B>>>(i_signalOUT, i_hiBitArr, signalSize);
-				cutilCheckMsg("Kernel execution failed [ addPseudoBalanced ]");
-				
-				// FIXME: Timing cost of the rebalance is expensive > .5 seconds per call for 26xxxxxx exponent
-				rebalanceIrrIntSEQGPU<<<1, 1>>>(i_signalOUT, bitsPerWord8, signalSize);
-				cutilCheckMsg("Kernel execution failed [ rebalanceIrrIntSEQGPU ]");
-
-				cutilSafeCall(cudaMemcpy(h_signalOUT, i_signalOUT, sizeof(int)*signalSize, cudaMemcpyDeviceToHost));
+				if (opt_verbose) {
+					// Display current iteration's residue and error if verbose
+					addPseudoBalanced<<<numBlocks, T_PER_B>>>(i_signalOUT, i_hiBitArr, signalSize);
+					cutilCheckMsg("Kernel execution failed [ addPseudoBalanced ]");
+					
+					// FIXME: Timing cost of the rebalance is expensive > .5 seconds per call for 26xxxxxx exponent
+					rebalanceIrrIntSEQGPU<<<1, 1>>>(i_signalOUT, bitsPerWord8, signalSize);
+					cutilCheckMsg("Kernel execution failed [ rebalanceIrrIntSEQGPU ]");
+					
+					cutilSafeCall(cudaMemcpy(h_signalOUT, i_signalOUT, sizeof(int)*signalSize, cudaMemcpyDeviceToHost));
+				}
 
 				// buf needs to fit formatted eta_time
 				char buf[64];
@@ -1399,10 +1401,16 @@ static __host__ void mersenneTest(Real *cp_signal) {
 				}
 
 				printFriendlyTime(buf, eta_diff);
-				// Lie about the current iteration to match other programs
-				printf("[%4.1f%%] Iter %9d: %6.3f ms/iter, ETA %s, ", 100.0f * (float)iter / (float)testPrime, iter - 1, iter_time, buf);
-				print_residue(h_signalOUT);
-				printf("\n");
+
+				if (opt_verbose) {
+					// Lie about the current iteration to match other programs
+					printf("[%4.1f%%] Iter %9d: %6.3f ms/iter, ETA %s, ", 100.0f * (float)iter / (float)testPrime, iter - 1, iter_time, buf);
+					print_residue(h_signalOUT);
+					printf("\n");
+				} else {
+					printf("[%4.1f%%] Iter %9d: %6.3f ms/iter, ETA %s\n", 100.0f * (float)iter / (float)testPrime, iter - 1, iter_time, buf);
+				}
+
 				fflush(stdout);
 			}
 		}
