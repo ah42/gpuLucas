@@ -166,10 +166,11 @@ const int T_PER_B = 256;
 
 // These determine the highest FFT signalSize we will check in findSignalSize()
 // where signalSize == 2^MAX_2 * 3^MAX_3 * 5^MAX_5 * 7^MAX_7
+// signalSize also must be divisible by T_PER_B, so every transform will have a power-of-2 component
 #define MAX_2 24 // 16777216
-#define MAX_3 15 // 14348907
-#define MAX_5 10 // 9765625
-#define MAX_7 8  // 5764801
+#define MAX_3 5  // 243 * T_PER_B
+#define MAX_5 3  // 125 * T_PER_B
+#define MAX_7 2  //  49 * T_PER_B
 
 // This determines the maximum allowable roundoff error
 #define ERROR_LIMIT 0.30f
@@ -1004,12 +1005,18 @@ static __host__ void freeArrays() {
  */
 static __host__ unsigned int findSignalSize() {
 	int optimal_length = 0;
-	float bestTime = 99999;
+	float bestTime = 99999; // dummy value
 	uint64_t signalSize64; // need to be bigger than necessary so some of the FFTlen combinations don't overflow
-	// Only use lengths that are between 1/15th and 1/20th the testPrime
-	// and round it up to the nearest T_PER_B size, since we're only testing multiples of T_PER_B
-	int max_nx = ((testPrime / 17 / T_PER_B) + 1) * T_PER_B;
+
+	// Start with testing lengths between a minimum = 1/20th of the testPrime, rounded to the nearest T_PER_B multiple
+	// and a maximum = next higher power-of-two, but no higher than 1/14th of the testPrime
+	// to avoid wasting our time testing un-necessarily large sizes
 	int min_nx = ((testPrime / 20 / T_PER_B) + 1) * T_PER_B;
+
+	int max_nx = 1;
+	while (max_nx < (testPrime >> 4)) // shift until max_nx is a power of two large enough to cover 1/16th the testPrime
+		max_nx <<= 1;
+	max_nx = min(max_nx, ((testPrime / 14 / T_PER_B) + 1) * T_PER_B); // but just in case it's too big, cap it at 1/14th the testPrime
 
 	if (!opt_quiet)
 		printf("Testing FFT lengths between %d and %d\n\n", min_nx, max_nx);
@@ -1031,7 +1038,12 @@ restart_findSignalSize:
 			for (int five = 0; five <= MAX_5; five++) {
 				for (int seven = 0; seven <= MAX_7; seven++) {
 					signalSize64 = (powl(2,two) * powl(3,three) * powl(5,five) * powl(7,seven));
-					if ((signalSize64 <= (unsigned int)max_nx) & (signalSize64 >= (unsigned int)min_nx) & (signalSize64 % T_PER_B == 0)) {
+					if (
+							(signalSize64 <= (unsigned int)max_nx) &
+							(signalSize64 >= (unsigned int)min_nx) &
+							(signalSize64 % T_PER_B == 0) &
+							(3*three + 5*five + 7*seven < 15) // This test should eliminate most of the error-prone compound lengths
+							) {
 						maxerr = 0;
 						signalSize = signalSize64;
 						numBlocks = signalSize/T_PER_B;
@@ -1066,7 +1078,7 @@ restart_findSignalSize:
 						freeArrays();
 
 						if (!opt_quiet)
-							printf("Testing signalSize %d, time: %3.2fms, error: %1.4f", (int)signalSize, elapsedTime/iter, maxerr);
+							printf("Testing signalSize %9d, time: %5.3fms, error: %6.5f", (int)signalSize, (float)elapsedTime/(float)iter, maxerr);
 
 						if (maxerr < ERROR_LIMIT) {
 							if (elapsedTime < bestTime) {
@@ -1388,9 +1400,10 @@ static __host__ void mersenneTest(Real *cp_signal) {
 
 				printFriendlyTime(buf, eta_diff);
 				// Lie about the current iteration to match other programs
-				printf("[%4.1f%%] Iter %d: %01.2f ms/iter, ETA %s, ", 100.0f * (float)iter / (float)testPrime, iter - 1, iter_time, buf);
+				printf("[%4.1f%%] Iter %9d: %6.3f ms/iter, ETA %s, ", 100.0f * (float)iter / (float)testPrime, iter - 1, iter_time, buf);
 				print_residue(h_signalOUT);
 				printf("\n");
+				fflush(stdout);
 			}
 		}
 	}
