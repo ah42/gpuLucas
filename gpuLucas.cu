@@ -182,7 +182,7 @@ int h_HI_MODMASK;
 int opt_quiet = 0;
 int opt_verbose = 0;
 char program_name[] = "gpuLucas";
-char program_version[] = "0.9.2";
+char program_version[] = "0.9.3";
 unsigned int iter = 0;
 unsigned int signalSize = 0, testPrime = 0;
 int numBlocks = 0, numFFTblocks = 0;
@@ -1429,7 +1429,7 @@ static __host__ Real *readCheckpoint(unsigned int *signalSize, unsigned int *res
 		if (!fPtr) {
 			// Both failed, give up
 			if (opt_verbose)
-				fprintf(stderr, "failed.\n\nUnable to load a checkpoint file, starting from the beginning\n");
+				fprintf(stderr, "failed.\n\nUnable to find a valid checkpoint file, starting from the beginning\n");
 			return NULL;
 		}
 	}
@@ -1444,36 +1444,36 @@ static __host__ Real *readCheckpoint(unsigned int *signalSize, unsigned int *res
 	}
 
 	if  (strcmp(program_name_r, program_name) != 0) {
-		fprintf(stderr, "Checkpoint was created with a different application, not using checkpoint\n\n");
+		fprintf(stderr, "Checkpoint file was created with a different application, not using checkpoint\n\n");
 		return NULL;
 	}
 
 	if (strcmp(program_vers_r, program_version) != 0) {
-		fprintf(stderr, "Checkpoint was created with a different version of %s, attempting to continue\n\n", program_name);
+		fprintf(stderr, "Checkpoint file was created with a different version of %s, attempting to continue\n\n", program_name);
 	}
 
 	// check parameters
 	if (fread (&testPrime_r,  1, sizeof (testPrime_r),  fPtr) != sizeof (testPrime_r)  ||
 		fread (&signalSize_r, 1, sizeof (signalSize_r), fPtr) != sizeof (signalSize_r) ||
 		fread (&resumeiter_r, 1, sizeof (resumeiter_r), fPtr) != sizeof (resumeiter_r)) {
-			fprintf (stderr, "\nThe checkpoint doesn't match current test.  Current test will be restarted\n");
+			fprintf (stderr, "\nThe checkpoint file doesn't match the current test.  Exiting...\n");
 			fclose (fPtr);
-			return NULL;
+			exit(-1);
 	}
 	
 	if (testPrime != testPrime_r) { 
-		fprintf (stderr, "\nThe checkpoint doesn't match current test.  Current test will be restarted\n");
+		fprintf (stderr, "\nThe checkpoint file doesn't match the current test.  Exiting...\n");
 		fclose (fPtr);
-		return NULL;
+		exit(-1);
 	}
 	
 	// check for successful read of z, delayed until here since zSize can vary
 	signal = (Real *) malloc (sizeof (Real) * (signalSize_r));
 	if (fread (signal, 1, sizeof (Real) * (signalSize_r), fPtr) != (sizeof (Real) * (signalSize_r))) {
-		fprintf (stderr, "\nThe checkpoint doesn't match current test.  Current test will be restarted\n");
+		fprintf (stderr, "\nThe checkpoint file doesn't match the current test.  Exiting...\n");
 		fclose (fPtr);
 		free (signal);
-		return NULL;
+		exit(-1);
 	}
 
 	// We have a good checkpoint. Return it
