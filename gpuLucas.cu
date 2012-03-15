@@ -237,10 +237,11 @@ typedef cufftDoubleReal Real;
 #define CUFFT_EXECINVERSE cufftExecZ2D
 
 // Global pointers
-static int     *i_signalOUT, *h_signalOUT, *h_bitsPerWord, *i_hiBitArr;
+static int     *i_signalOUT, *h_signalOUT, *h_bitsPerWord;
+static int8_t  *i_hiBitArr;
 static Real    *d_signal, *dev_A, *dev_Ainv, *cp_signal;
 static Complex *z_signal;
-static unsigned char *bitsPerWord8, *h_bitsPerWord8;
+static uint8_t *bitsPerWord8, *h_bitsPerWord8;
 static int64_t *llint_signal;
 static double  *h_A, *h_Ainv;
 static float   *dev_errArr, *host_errArr;
@@ -254,7 +255,7 @@ static cufftHandle plan1, plan2;
 
 static __global__ void ComplexPointwiseSqr(Complex* z_signal, int signalSize);
 static __global__ void loadValue4ToFFTarray(double *d_signal);
-static __global__ void loadIntToDoubleIBDWT(double *d_signal, int *i_signalOUT, int *i_hiBitArr, double *dev_A, int signalSize);
+static __global__ void loadIntToDoubleIBDWT(double *d_signal, int *i_signalOUT, int8_t *i_hiBitArr, double *dev_A, int signalSize);
 
 /*
  * In bitsPerWord, we use a bit-vector:
@@ -264,7 +265,7 @@ static __global__ void loadIntToDoubleIBDWT(double *d_signal, int *i_signalOUT, 
  *    The BASE_HI, BASE_LO, HI_BITS, LO_BITS are global constants.
  */
 static __host__ void computeBitsPerWord(int *bitsPerWord, int signalSize);
-static __host__ void computeBitsPerWordVectors(unsigned char *bitsPerWord8, int *bitsPerWord, int signalSize);
+static __host__ void computeBitsPerWordVectors(uint8_t *bitsPerWord8, int *bitsPerWord, int signalSize);
 
 /**
  * code for convolution error-checking
@@ -302,7 +303,7 @@ static __global__ void invDWTproductMinus2(int64_t *llint_signal, double *d_sign
  * Use llintToIrrBal<2,3,4,5,6>, as appropriate.  And yes, we can have pointers
  *   to global kernels.  (Works fine, just address.)
  */
-void (*sliceAndDice)(int *iArr, int *hiArr, int64_t *lliArr, unsigned char *bperW8arr, const int size);
+void (*sliceAndDice)(int *iArr, int8_t *hiArr, int64_t *lliArr, uint8_t *bperW8arr, const int size);
 
 /**
  * For n = 2 to 6. This uses templated kernel functions for the different lengths,
@@ -664,7 +665,7 @@ static __host__ void computeBitsPerWord(int *bitsPerWord, int signalSize) {
  * do modular wrap-around to get successive words from element [size - 1]
  * Works backwards to get preceeding bits
  */
-static __host__ void computeBitsPerWordVectors(unsigned char *bitsPerWord8, int *bitsPerWord, int signalSize) {
+static __host__ void computeBitsPerWordVectors(uint8_t *bitsPerWord8, int *bitsPerWord, int signalSize) {
 
 	for (int i = 0; i < signalSize; i++) {
 		bitsPerWord8[i] = 0;
@@ -694,7 +695,7 @@ static __global__ void loadValue4ToFFTarray(double *d_signal) {
 
 
 // This includes pseudobalance by adding hi order terms from last rebalancing.
-static __global__ void loadIntToDoubleIBDWT(double *d_signal, int *i_signalOUT, int *i_hiBitArr, double *dev_A, int signalSize) {
+static __global__ void loadIntToDoubleIBDWT(double *d_signal, int *i_signalOUT, int8_t *i_hiBitArr, double *dev_A, int signalSize) {
 
 	const int tid = blockIdx.x*blockDim.x + threadIdx.x;
 	
@@ -859,7 +860,7 @@ static __host__ int mallocArrays() {
 	int i_sizeOUT = sizeof(int)*signalSize;
 	int d_size = sizeof(Real)*signalSize;
 	int z_size = sizeof(Complex)*(signalSize/2 + 1);
-	int bpw_size = sizeof(unsigned char)*signalSize;
+	int bpw_size = sizeof(uint8_t)*signalSize;
 	int llintSignalSize = sizeof(int64_t)*signalSize;
 	
 	cutilSafeCall(cudaMalloc((void**)&i_signalOUT, i_sizeOUT));
@@ -872,7 +873,7 @@ static __host__ int mallocArrays() {
 	h_signalOUT = (int *) malloc(sizeof(int)*signalSize);
 
 	// Array for high-bit carry out
-	cutilSafeCall(cudaMalloc((void**)&i_hiBitArr, sizeof(int)*signalSize));
+	cutilSafeCall(cudaMalloc((void**)&i_hiBitArr, sizeof(int8_t)*signalSize));
 
 	//make host and device arrays for error computation
 	cudaMalloc((void**) &dev_errArr, signalSize*sizeof(float));
@@ -885,7 +886,7 @@ static __host__ int mallocArrays() {
 
 	// Store computed bit values and bases for precomputation of masks
 	h_bitsPerWord = (int *) malloc(sizeof(int)*signalSize);
-	h_bitsPerWord8 = (unsigned char *) malloc(sizeof(unsigned char)*signalSize);
+	h_bitsPerWord8 = (uint8_t *) malloc(sizeof(uint8_t)*signalSize);
 
 	// Make sure all the cuda Arrays are cleared before we start working on them
 	cutilSafeCall(cudaMemset(i_signalOUT, 0, i_sizeOUT));
@@ -895,7 +896,7 @@ static __host__ int mallocArrays() {
 	cutilSafeCall(cudaMemset(dev_Ainv, 0, d_size));
 	cutilSafeCall(cudaMemset(bitsPerWord8, 0, bpw_size));
 	cutilSafeCall(cudaMemset(llint_signal, 0, llintSignalSize));
-	cutilSafeCall(cudaMemset(i_hiBitArr, 0, sizeof(int)*signalSize));
+	cutilSafeCall(cudaMemset(i_hiBitArr, 0, sizeof(int8_t)*signalSize));
 	cutilSafeCall(cudaMemset(dev_errArr, 0, signalSize*sizeof(float)));
 
 	// Compute word-sizes to use when dicing products to sum to int array
@@ -1369,8 +1370,6 @@ static __host__ void mersenneTest(Real *cp_signal) {
 	if (nonZeros) {
 		if (testPrime < 50000 & opt_verbose) {
 			for (unsigned int i = 0; i < signalSize; i++) {
-			//	unsigned char ch = h_signal[i] & 0xFF;
-
 				printf("%05x", h_signalOUT[i]);
 				if (i % 2 == 3)
 					printf(" ");

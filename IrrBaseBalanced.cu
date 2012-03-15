@@ -50,7 +50,7 @@
  * @template-param number - number of subsequent digits to distribute product bits
  */
 template <int number>
-static __global__ void llintToIrrBal(int *i_signalOUT, int *i_hiBitArr, int64_t *llint_signal, unsigned char *bitsPerWord8, const int signalSize) {
+static __global__ void llintToIrrBal(int *i_signalOUT, int8_t *i_hiBitArr, int64_t *llint_signal, uint8_t *bitsPerWord8, const int signalSize) {
 	const int tid = blockIdx.x*blockDim.x + threadIdx.x;
 	const int tba = threadIdx.x; // thread block address for digits index
 
@@ -71,7 +71,7 @@ static __global__ void llintToIrrBal(int *i_signalOUT, int *i_hiBitArr, int64_t 
 
 	signs[tba + number] = llint_signal[tid] < 0 ? -1 : 1;
 	digits[tba + number] = llint_signal[tid] * signs[tba + number]; 
-	unsigned char bperW8 = bitsPerWord8[tid];
+	uint8_t bperW8 = bitsPerWord8[tid];
 
 	// get info for this digit
 	int isHi = bperW8 & 1;
@@ -79,7 +79,7 @@ static __global__ void llintToIrrBal(int *i_signalOUT, int *i_hiBitArr, int64_t 
 	int myBase = BASE_LO << isHi;
 	int myMask = myBase - 1;
 	int baseOver2 = myBase >> 1;
-	int hival = 0;
+	int8_t hival = 0;
 
 	__syncthreads();
 
@@ -114,7 +114,7 @@ static __global__ void llintToIrrBal(int *i_signalOUT, int *i_hiBitArr, int64_t 
  *    current digit.  Don't rebalance if exceeds max or min on balanced
  *    representation.
  */
-static __global__ void addPseudoBalanced(int *i_signalOUT, int *i_hiBitArr, int signalSize) {
+static __global__ void addPseudoBalanced(int *i_signalOUT, int8_t *i_hiBitArr, int signalSize) {
 
 	const int tid = blockIdx.x*blockDim.x + threadIdx.x;
 
@@ -130,7 +130,7 @@ static __global__ void addPseudoBalanced(int *i_signalOUT, int *i_hiBitArr, int 
  *   done CPU-side.
  */
 // FIXME: -aaron: This is very slow, and costs .5 seconds on each call (every checkpoint)
-static __global__ void rebalanceIrrIntSEQGPU(int *i_signalOUT, unsigned char *bitsPerWord8, int signalSize) {
+static __global__ void rebalanceIrrIntSEQGPU(int *i_signalOUT, uint8_t *bitsPerWord8, int signalSize) {
 
 	int carryOut = 0;
 	int tBase, tBaseOver2;
