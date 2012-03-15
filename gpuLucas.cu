@@ -317,18 +317,18 @@ void setSliceAndDice() {
 	int ratio = testPrime / signalSize;
 
 	if (ratio >= 21) {
-		fprintf(stderr, "testPrime / signalSize out of range: %d\n",
-				(int)(testPrime / signalSize));
+		fprintf(stderr, "testPrime (%d)/ signalSize (%d) out of range: %d\n",
+				testPrime, signalSize, (int)(testPrime / signalSize));
 		exit(-1);
 	}
 
 	if (ratio >= 18)
 		sliceAndDice = llintToIrrBal<2>;
-	else if (ratio >= 15)
+	else if (ratio >= 16)
 		sliceAndDice = llintToIrrBal<3>;
-	else if (ratio >= 12)
+	else if (ratio >= 14)
 		sliceAndDice = llintToIrrBal<4>;
-	else if (ratio >= 9)
+	else if (ratio >= 12)
 		sliceAndDice = llintToIrrBal<5>;
 	else
 		sliceAndDice = llintToIrrBal<6>;
