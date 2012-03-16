@@ -191,6 +191,7 @@ char program_version[] = "0.9.3";
 int iter = 0;
 int signalSize = 0, testPrime = 0;
 int numBlocks = 0, numFFTblocks = 0;
+int in_place = 0;
 
 volatile int do_gracefulExit = 0;
 
@@ -853,16 +854,29 @@ static __host__ float mersenneIter() {
 	}
 
 	// Transform signal
-	cufftSafeCall(CUFFT_EXECFORWARD(plan1, d_signal, z_signal));
-	cutilCheckMsg("Kernel execution failed [ CUFFT_EXECFORWARD ]");
-	
-	// Multiply the coefficients componentwise
-	ComplexPointwiseSqr<<<numFFTblocks, T_PER_B/UNROLL_KERNEL>>>(z_signal, signalSize/2 + 1);
-	cutilCheckMsg("Kernel execution failed [ ComplexPointwiseSqr ]");
-	
-	// Transform signal back
-	cufftSafeCall(CUFFT_EXECINVERSE(plan2, z_signal, d_signal));
-	cutilCheckMsg("Kernel execution failed [ CUFFT_EXECINVERSE ]");
+	if (unlikely(in_place)) {
+		cufftSafeCall(CUFFT_EXECFORWARD(plan1, d_signal, (cufftDoubleComplex *) d_signal));
+		cutilCheckMsg("Kernel execution failed [ CUFFT_EXECFORWARD ]");
+		
+		// Multiply the coefficients componentwise
+		ComplexPointwiseSqr<<<numFFTblocks, T_PER_B/UNROLL_KERNEL>>>((cufftDoubleComplex *) d_signal, signalSize/2 + 1);
+		cutilCheckMsg("Kernel execution failed [ ComplexPointwiseSqr ]");
+		
+		// Transform signal back
+		cufftSafeCall(CUFFT_EXECINVERSE(plan2, (cufftDoubleComplex *) d_signal, d_signal));
+		cutilCheckMsg("Kernel execution failed [ CUFFT_EXECINVERSE ]");
+	} else {
+		cufftSafeCall(CUFFT_EXECFORWARD(plan1, d_signal, z_signal));
+		cutilCheckMsg("Kernel execution failed [ CUFFT_EXECFORWARD ]");
+
+		// Multiply the coefficients componentwise
+		ComplexPointwiseSqr<<<numFFTblocks, T_PER_B/UNROLL_KERNEL>>>(z_signal, signalSize/2 + 1);    
+		cutilCheckMsg("Kernel execution failed [ ComplexPointwiseSqr ]");
+
+		// Transform signal back
+		cufftSafeCall(CUFFT_EXECINVERSE(plan2, z_signal, d_signal)); 
+		cutilCheckMsg("Kernel execution failed [ CUFFT_EXECINVERSE ]");
+	}
 	
 	if (timing) {
 		cutilSafeCall(cudaEventRecord(stop, 0));
@@ -942,21 +956,29 @@ static __host__ int mallocArrays() {
 	// Check for available device RAM before allocating this signalSize
 	size_t free_mem, total_mem;
 	cudaMemGetInfo(&free_mem, &total_mem);
-
+	in_place = 0;
 	// we need roughly 50 times the signalSize in bytes, plus the fft.
 	// Memory needs:
 	// cudaMallocs: roughly 50 times the signalSize + 896 bytes, minimum 2048KiB
 	// cufft plans: roughly 32 times the signalSize, minimum 1024KiB
 	unsigned int estimated_size = max(50 * signalSize/1024 + 896, 2048) + max(32 * signalSize/1024, 1024);
 	if ((unsigned int)free_mem/1024 < estimated_size) {
-		printf("Not enough available device memory (Needed: %dKiB, have: %dKiB)\n", estimated_size, (int)free_mem/1024);
-		fflush(stdout);
-		return -1;
+		// We don't have enough available memory, can we do slower in-place transorms?
+		estimated_size = max(42 * signalSize/1024 + 896, 2048) + max(32 * signalSize/1024, 1024);
+		if ((unsigned int)free_mem/1024 < estimated_size) {
+			printf("Not enough available device memory (Needed: %dKiB, have: %dKiB)\n", estimated_size, (int)free_mem/1024);
+			fflush(stdout);
+			return -1;
+		} else {
+			printf("Using in-place transform ");
+			in_place = 1;
+		}
 	}
 
 	cutilSafeCall(cudaMalloc((void**)&i_signal, i_size));
 	cutilSafeCall(cudaMalloc((void**)&d_signal, d_size));
-	cutilSafeCall(cudaMalloc((void**)&z_signal, z_size));
+	if (in_place == 0)
+		cutilSafeCall(cudaMalloc((void**)&z_signal, z_size));
 	cutilSafeCall(cudaMalloc((void**)&dev_A, d_size));
 	cutilSafeCall(cudaMalloc((void**)&dev_Ainv, d_size));
 	cutilSafeCall(cudaMalloc((void**)&bitsPerWord8, bpw_size));
@@ -981,7 +1003,8 @@ static __host__ int mallocArrays() {
 	// Make sure all the cuda Arrays are cleared before we start working on them
 	cutilSafeCall(cudaMemset(i_signal, 0, i_size));
 	cutilSafeCall(cudaMemset(d_signal, 0, d_size));
-	cutilSafeCall(cudaMemset(z_signal, 0, z_size));
+	if (in_place == 0)
+		cutilSafeCall(cudaMemset(z_signal, 0, z_size));
 	cutilSafeCall(cudaMemset(dev_A, 0, d_size));
 	cutilSafeCall(cudaMemset(dev_Ainv, 0, d_size));
 	cutilSafeCall(cudaMemset(bitsPerWord8, 0, bpw_size));
@@ -1020,7 +1043,8 @@ static __host__ void freeArrays() {
 	
 	cutilSafeCall(cudaFree(i_signal));
 	cutilSafeCall(cudaFree(d_signal));
-	cutilSafeCall(cudaFree(z_signal));
+	if (in_place == 0)
+		cutilSafeCall(cudaFree(z_signal));
 
 	cutilSafeCall(cudaFree(dev_A));
 	cutilSafeCall(cudaFree(dev_Ainv));
