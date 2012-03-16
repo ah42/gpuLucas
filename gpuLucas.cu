@@ -472,9 +472,11 @@ int main(int argc, char* argv[]) {
 	cudaDeviceProp deviceProp;
 	for (dev = 0; dev < deviceCount; ++dev) {
 		cudaGetDeviceProperties(&deviceProp, dev);
-		fprintf(stderr, "\tDevice %d: %s\n", dev, deviceProp.name);
-		fprintf(stderr, "\t\tCompute Capability: %d.%d\n", deviceProp.major, deviceProp.minor);
-		fprintf(stderr, "\t\tTotal Global RAM:   %dMiB\n", (int)deviceProp.totalGlobalMem/1024/1024);
+		if (!opt_quiet) {
+			fprintf(stderr, "\tDevice %d: %s\n", dev, deviceProp.name);
+			fprintf(stderr, "\t\tCompute Capability: %d.%d\n", deviceProp.major, deviceProp.minor);
+			fprintf(stderr, "\t\tTotal Global RAM:   %dMiB\n", (int)deviceProp.totalGlobalMem/1024/1024);
+		}
 	}
 
 	// Chosen device = use_device
@@ -516,11 +518,12 @@ int main(int argc, char* argv[]) {
 		exit(-1);
 	}
 
-	printf("Testing M%d, using an irrational base with wordlengths (%d, %d),\n"
-		   "\tusing an FFT runlength of 2^%f = %d\n",
-		   testPrime, h_LO_BITS, h_HI_BITS, log(1.0*signalSize)/log(2.0), signalSize);
-	if (!opt_quiet)
+	if (!opt_quiet) {
+		printf("Testing M%d, using an irrational base with wordlengths (%d, %d),\n"
+				"\tusing an FFT runlength of 2^%f = %d\n",
+				testPrime, h_LO_BITS, h_HI_BITS, log(1.0*signalSize)/log(2.0), signalSize);
 		printf("\n\tNUM_BLOCKS = %d, T_PER_B = %d\n", signalSize/T_PER_B, T_PER_B);
+	}
 
 	int testIterations, trialFraction;
 	if (!resuming) {
@@ -562,13 +565,13 @@ int main(int argc, char* argv[]) {
 			printf ("Encountered an error in the errorTrial test. Aborting\n");
 			cutilDeviceReset();
 			exit(EXIT_FAILURE);
-	} else
+	} else if (!opt_quiet)
 		printf("\nError trial completed successfully.\n");
 
-	char buf[64];
-	printFriendlyTime(buf, (elapsedMsecDEV*testPrime)/1000);
-
 	if (!opt_quiet) {
+		char buf[64];
+		printFriendlyTime(buf, (elapsedMsecDEV*testPrime)/1000);
+		
 		printf("\nTiming:  To test M%d"
 				"\n  elapsed time :      %10d msec = %.1f sec"
 				"\n  dev. elapsed time:  %10d msec = %d sec"
@@ -577,19 +580,17 @@ int main(int argc, char* argv[]) {
 				(int)elapsedMsec, elapsedMsec/1000,
 				(int)(elapsedMsecDEV*trialFraction), (int)(elapsedMsecDEV*trialFraction/1000),
 				buf);
-	} else
-		printf("\n  est. total time:\t%10s",
-				buf);
-
-	time_t eta_time = (elapsedMsecDEV*(testPrime-resume_iter))/1000.0 + time(NULL);    // eta relative to 'now'
-	strftime(buf, 64, "%A %c", localtime(&eta_time));
-	printf(" = %s\n", buf);
+	
+		time_t eta_time = (elapsedMsecDEV*(testPrime-resume_iter))/1000.0 + time(NULL);    // eta relative to 'now'
+		strftime(buf, 64, "%A %c", localtime(&eta_time));
+		printf(" = %s\n", buf);
+	}
 
 
 	if (resuming) {
 		printf("\nResuming full test of M%d at iteration %d (%2.1f%%)\n\n", testPrime, resume_iter, 100.0f * (float)resume_iter / (float)testPrime);
 		iter = resume_iter;
-	} else {
+	} else if (!opt_quiet) {
 		printf("\nBeginning full test of M%d\n\n", testPrime);
 	}
 
@@ -1084,8 +1085,10 @@ restart_findSignalSize:
 						setSliceAndDice();
 						initConstantSymbols();
 
-						printf("Testing signalSize %9d... ", signalSize);
-						fflush(stdout);
+						if (!opt_quiet) {
+							printf("Testing signalSize %9d... ", signalSize);
+							fflush(stdout);
+						}
  
 						maxerr = mallocArrays();
 						if (maxerr != 0)
