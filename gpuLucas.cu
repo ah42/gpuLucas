@@ -187,7 +187,7 @@ int h_HI_MODMASK;
 int opt_quiet = 0;
 int opt_verbose = 0;
 char program_name[] = "gpuLucas";
-char program_version[] = "0.9.3";
+char program_version[] = "0.9.4";
 int iter = 0;
 int signalSize = 0, testPrime = 0;
 int numBlocks = 0, numFFTblocks = 0;
