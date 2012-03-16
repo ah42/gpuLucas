@@ -1285,7 +1285,7 @@ static __host__ float errorTrial(int testIterations) {
 * print_residue() -- output the Lucas-Lehmer residue for non-prime exponents
 *   needed for result submission to GIMPS, or verifying results with other clients
 */
-static __host__ void print_residue(int *h_signalOUT) {
+static __host__ void print_residue(char *buf, int *h_signalOUT) {
 	static uint64_t *hex = NULL;
 	static uint64_t prior_hex = 0;
 
@@ -1343,10 +1343,10 @@ static __host__ void print_residue(int *h_signalOUT) {
 			}
 	} while(totalbits > 0);
 	
-	printf("0x");
+	int length = sprintf(buf, "0x");
 	
 	for (j = (i - 1)/8; j >= 0; j--) {
-			printf("%02lx", hex[j]);
+			length += sprintf(buf + length, "%02lx", hex[j]);
 	}
 	return;
 }
@@ -1472,8 +1472,8 @@ static __host__ void mersenneTest(Real *cp_signal) {
 				if (opt_verbose) {
 					// Lie about the current iteration to match other programs
 					printf("[%4.1f%%] Iter %9d: %6.3f ms/iter, ETA %s, ", 100.0f * (float)iter / (float)testPrime, iter - 1, iter_time, buf);
-					print_residue(h_signalOUT);
-					printf("\n");
+					print_residue(buf, h_signalOUT);
+					printf("%s\n", buf);
 				} else {
 					printf("[%4.1f%%] Iter %9d: %6.3f ms/iter, ETA %s\n", 100.0f * (float)iter / (float)testPrime, iter - 1, iter_time, buf);
 				}
@@ -1510,6 +1510,15 @@ static __host__ void mersenneTest(Real *cp_signal) {
 			break;
 		}
 	}
+
+	FILE *fPtr;
+	fPtr = fopen("results.txt", "a");
+	if (fPtr == NULL)
+		printf("Cannot open results.txt\n");
+
+	char buf[20];
+	print_residue(buf, h_signalOUT);
+
 	if (nonZeros) {
 		if (testPrime < 50000 & opt_verbose) {
 			for (int i = 0; i < signalSize; i++) {
@@ -1524,15 +1533,19 @@ static __host__ void mersenneTest(Real *cp_signal) {
 		if (opt_verbose)
 			printf("\nM_%d tests as non-prime.\n\n", testPrime);
 
-		printf("\nM( %d )C, ", testPrime);
-		print_residue(h_signalOUT);
+		printf("\nM( %d )C, %s", testPrime, buf);
+		fprintf(fPtr, "M( %d )C, %s", testPrime, buf);
 	} else {
 		printf("\n\n\aPRIME FOUND: M_%d tests as prime.", testPrime);
 		printf("\nM( %d )P", testPrime);
+		fprintf(fPtr, "M( %d )P", testPrime);
 
 	}
-	printf(", n = %d, %s v%s\n", signalSize, program_name, program_version);
 
+	printf(", n = %d, %s v%s\n", signalSize, program_name, program_version);
+	fprintf(fPtr, ", n = %d, %s v%s\n", signalSize, program_name, program_version);
+
+	fclose(fPtr);
 	freeArrays();
 	return;
 }
