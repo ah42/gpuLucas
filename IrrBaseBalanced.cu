@@ -50,7 +50,7 @@
  * @template-param number - number of subsequent digits to distribute product bits
  */
 template <int number>
-static __global__ void llintToIrrBal(int *i_signal, int8_t *i_hiBitArr, const int64_t *llint_signal, const uint8_t *bitsPerWord8, const int signalSize) {
+static __global__ void llintToIrrBal(int *i_signal, int8_t *i_hiBitArr, const int64_t *llint_signal, const uint8_t *bitsPerWord8) {
 	const int tid = blockIdx.x*blockDim.x + threadIdx.x;
 	const int tba = threadIdx.x; // thread block address for digits index
 
@@ -64,7 +64,7 @@ static __global__ void llintToIrrBal(int *i_signal, int8_t *i_hiBitArr, const in
 	if (tba < number) {
 		int offset = tid;
 		if (tid < number)
-			offset += signalSize;
+			offset += DEV_SIGNALSIZE;
 		signs[tba] = llint_signal[offset - number] < 0 ? -1 : 1;
 		digits[tba]= llint_signal[offset - number] * signs[tba];
 	}
@@ -114,12 +114,12 @@ static __global__ void llintToIrrBal(int *i_signal, int8_t *i_hiBitArr, const in
  *    current digit.  Don't rebalance if exceeds max or min on balanced
  *    representation.
  */
-static __global__ void addPseudoBalanced(int *i_signal, int8_t *i_hiBitArr, int signalSize) {
+static __global__ void addPseudoBalanced(int *i_signal, int8_t *i_hiBitArr) {
 
 	const int tid = blockIdx.x*blockDim.x + threadIdx.x;
 
 	if (tid == 0) 
-		i_signal[tid] += i_hiBitArr[signalSize - 1];
+		i_signal[tid] += i_hiBitArr[DEV_SIGNALSIZE - 1];
 	else
 		i_signal[tid] += i_hiBitArr[tid - 1];
 }
@@ -130,14 +130,14 @@ static __global__ void addPseudoBalanced(int *i_signal, int8_t *i_hiBitArr, int 
  *   done CPU-side.
  */
 // FIXME: -aaron: This is very slow, and costs .5 seconds on each call (every checkpoint)
-static __global__ void rebalanceIrrIntSEQGPU(int *i_signal, uint8_t *bitsPerWord8, int signalSize) {
+static __global__ void rebalanceIrrIntSEQGPU(int *i_signal, uint8_t *bitsPerWord8) {
 
 	int carryOut = 0;
 	int tBase, tBaseOver2;
 	int BASE_HIOVER2 = BASE_HI >> 1;
 	int BASE_LOOVER2 = BASE_LO >> 1;
 #pragma unroll 128
-	for (int i = 0; i < signalSize; i++) {
+	for (int i = 0; i < DEV_SIGNALSIZE; i++) {
 
 		if (bitsPerWord8[i] & 1) {
 			tBase = BASE_HI;

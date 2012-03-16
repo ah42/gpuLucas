@@ -188,8 +188,8 @@ int opt_quiet = 0;
 int opt_verbose = 0;
 char program_name[] = "gpuLucas";
 char program_version[] = "0.9.3";
-unsigned int iter = 0;
-unsigned int signalSize = 0, testPrime = 0;
+int iter = 0;
+int signalSize = 0, testPrime = 0;
 int numBlocks = 0, numFFTblocks = 0;
 
 volatile int do_gracefulExit = 0;
@@ -208,6 +208,7 @@ __constant__ int BASE_LO;
 __constant__ int BASE_HI;
 __constant__ int LO_MODMASK;
 __constant__ int HI_MODMASK;
+__constant__ int DEV_SIGNALSIZE;
 
 // Need this include after T_PER_B so can use as shared memory array-length
 //   in IrrBaseBalanced.cu routines to avoid dynamic memory alloc on GPU
@@ -225,6 +226,7 @@ static __host__ void initConstantSymbols() {
 	h_BASE_HI = 1 << h_HI_BITS;
 	h_LO_MODMASK = h_BASE_LO - 1;
 	h_HI_MODMASK = h_BASE_HI - 1;
+	cutilSafeCall(cudaMemcpyToSymbol(DEV_SIGNALSIZE, &signalSize, sizeof(int)));
 	cutilSafeCall(cudaMemcpyToSymbol(LO_BITS, &h_LO_BITS, sizeof(int)));
 	cutilSafeCall(cudaMemcpyToSymbol(HI_BITS, &h_HI_BITS, sizeof(int)));
 	cutilSafeCall(cudaMemcpyToSymbol(BASE_LO, &h_BASE_LO, sizeof(int)));
@@ -258,9 +260,9 @@ static cufftHandle plan1, plan2;
  *   but give an overview of the functions so left it.
  */
 
-static __global__ void ComplexPointwiseSqr(Complex* z_signal, const int signalSize);
+static __global__ void ComplexPointwiseSqr(Complex* z_signal, const int size);
 static __global__ void loadValue4ToFFTarray(double *d_signal);
-static __global__ void loadIntToDoubleIBDWT(double *d_signal, const int *i_signal, const int8_t *i_hiBitArr, const double *dev_A, const int signalSize);
+static __global__ void loadIntToDoubleIBDWT(double *d_signal, const int *i_signal, const int8_t *i_hiBitArr, const double *dev_A);
 
 /*
  * In bitsPerWord, we use a bit-vector:
@@ -269,21 +271,21 @@ static __global__ void loadIntToDoubleIBDWT(double *d_signal, const int *i_signa
  * Where the positions 0=current, 1=next, 2=nextnext, etc.
  *    The BASE_HI, BASE_LO, HI_BITS, LO_BITS are global constants.
  */
-static __host__ void computeBitsPerWord(int *bitsPerWord, int signalSize);
-static __host__ void computeBitsPerWordVectors(uint8_t *bitsPerWord8, int *bitsPerWord, int signalSize);
+static __host__ void computeBitsPerWord(int *bitsPerWord);
+static __host__ void computeBitsPerWordVectors(uint8_t *bitsPerWord8, int *bitsPerWord);
 
 /**
  * code for convolution error-checking
  */
-static __global__ void computeMaxBitVector(float *dev_errArr, int64_t *llint_signal, int signalSize);
-static __host__ float findMaxErrorHOST(float *dev_errArr, float *host_errArr, int signalSize);
+static __global__ void computeMaxBitVector(float *dev_errArr, int64_t *llint_signal);
+static __host__ float findMaxErrorHOST(float *dev_errArr, float *host_errArr);
 
 /**
  * compute A and Ainv in extended precision, cast to doubles
  *   and load them to the host arrays.  We include the FFT 1/N scaling with
  *   host_ainv and pull it out of the pointwiseSqrAndScale code
  */
-static __host__ void computeWeightVectors(double *host_A, double *host_Ainv, int signalSize);
+static __host__ void computeWeightVectors(double *host_A, double *host_Ainv);
 
 /**
  * This completes the invDWT transform by multiplying the signal by a_inv,
@@ -308,7 +310,7 @@ static __global__ void invDWTproductMinus2(int64_t *llint_signal, const double *
  * Use llintToIrrBal<2,3,4,5,6>, as appropriate.  And yes, we can have pointers
  *   to global kernels.  (Works fine, just address.)
  */
-void (*sliceAndDice)(int *iArr, int8_t *hiArr, const int64_t *lliArr, const uint8_t *bperW8arr, const int size);
+void (*sliceAndDice)(int *i_signal, int8_t *i_hiBitArr, const int64_t *llint_signal, const uint8_t *bitsPerWord8);
 
 /**
  * For n = 2 to 6. This uses templated kernel functions for the different lengths,
@@ -347,12 +349,12 @@ void setSliceAndDice() {
  *    the average time per Lucas-Lehmer iteration based on timing
  *    of convolution-multiply and rebalancing functions
  */
-static __host__ float errorTrial(unsigned int testIterations);
-static __host__ unsigned int findSignalSize();
+static __host__ float errorTrial(int testIterations);
+static __host__ int findSignalSize();
 static __host__ void mersenneTest(Real *d_signal);
 
 static __host__ void writeCheckpoint(Real *signal);
-static __host__ Real *readCheckpoint(unsigned int *signalSize, unsigned int *resume_iter);
+static __host__ Real *readCheckpoint(int *signalSize, int *resume_iter);
 
 static __host__ void printFriendlyTime(char *buf, int time);
 
@@ -433,11 +435,15 @@ int main(int argc, char* argv[]) {
 
 	for (int index = optind; index < argc; index++) {
 		if (testPrime == 0 && (strlen(argv[index]) == strspn(argv[index],"0123456789"))) {
-				testPrime = atoi(argv[index]);
+			if (atol(argv[index]) > 2147483647) {
+				fprintf(stderr, "testPrime too large, aborting\n");
+				exit(-1);
+			}
+			testPrime = atoi(argv[index]);
 		} else {
-				print_help();
-				printf ("Non-option argument %s\n", argv[index]);
-				return(-1);
+			print_help();
+			printf ("Non-option argument %s\n", argv[index]);
+			return(-1);
 		}
 	}
 	if ( testPrime == 0) {
@@ -485,7 +491,7 @@ int main(int argc, char* argv[]) {
 	fprintf(stderr, "Using device %d: %s\n\n", use_device, deviceProp.name);
 	cudaSetDevice(use_device);
 
-	unsigned int resume_iter = 0;
+	int resume_iter = 0;
 
 	if ((cp_signal = readCheckpoint(&signalSize, &resume_iter)) != NULL)
 		resuming = 1;
@@ -636,7 +642,7 @@ int main(int argc, char* argv[]) {
  */
 
 // Complex pointwise multiplication
-static __global__ void ComplexPointwiseSqr(Complex* z_signal, int size) {
+static __global__ void ComplexPointwiseSqr(Complex* z_signal, const int size) {
 	const int tid = UNROLL_KERNEL * blockIdx.x*blockDim.x + threadIdx.x;
 	
 	Complex temp[UNROLL_KERNEL];
@@ -662,7 +668,7 @@ static __global__ void ComplexPointwiseSqr(Complex* z_signal, int size) {
  * Uses dd_real 128-bit double-doubles to avoid catastropic cancellation errors
  *   for non-power-of-two FFT lengths
  */
-static __host__ void computeWeightVectors(double *host_A, double *host_Ainv, int signalSize) {
+static __host__ void computeWeightVectors(double *host_A, double *host_Ainv) {
 
 	dd_real dd_A, dd_Ainv;
 	dd_real dd_N = dd_real(signalSize);
@@ -677,7 +683,7 @@ static __host__ void computeWeightVectors(double *host_A, double *host_Ainv, int
 	}
 }
 
-static __host__ void computeBitsPerWord(int *bitsPerWord, int signalSize) {
+static __host__ void computeBitsPerWord(int *bitsPerWord) {
 
 	double PoverN = testPrime/(double)signalSize;
 	for (int j = 1; j <= signalSize; j++) {	
@@ -689,7 +695,7 @@ static __host__ void computeBitsPerWord(int *bitsPerWord, int signalSize) {
  * do modular wrap-around to get successive words from element [size - 1]
  * Works backwards to get preceeding bits
  */
-static __host__ void computeBitsPerWordVectors(uint8_t *bitsPerWord8, int *bitsPerWord, int signalSize) {
+static __host__ void computeBitsPerWordVectors(uint8_t *bitsPerWord8, int *bitsPerWord) {
 
 	for (int i = 0; i < signalSize; i++) {
 		bitsPerWord8[i] = 0;
@@ -719,7 +725,7 @@ static __global__ void loadValue4ToFFTarray(double *d_signal) {
 
 
 // This includes pseudobalance by adding hi order terms from last rebalancing.
-static __global__ void loadIntToDoubleIBDWT(double *d_signal, const int *i_signal, const int8_t *i_hiBitArr, const double *dev_A, const int signalSize) {
+static __global__ void loadIntToDoubleIBDWT(double *d_signal, const int *i_signal, const int8_t *i_hiBitArr, const double *dev_A) {
 	const int tid = UNROLL_KERNEL * blockIdx.x*blockDim.x + threadIdx.x;
 	
 	int ival[UNROLL_KERNEL*2];
@@ -731,7 +737,7 @@ static __global__ void loadIntToDoubleIBDWT(double *d_signal, const int *i_signa
 	}
 	
 	if (tid == 0)
-		ival[0] = i_hiBitArr[signalSize - 1];
+		ival[0] = i_hiBitArr[DEV_SIGNALSIZE - 1];
 	
 #pragma unroll
 	for (int i=0; i<UNROLL_KERNEL; i++) {
@@ -751,7 +757,7 @@ static __global__ void loadIntToDoubleIBDWT(double *d_signal, const int *i_signa
 	
 #pragma unroll
 	for (int i=0; i<UNROLL_KERNEL; i++) {
-		if (tid + i*blockDim.x < signalSize) {
+		if (tid + i*blockDim.x < DEV_SIGNALSIZE) {
 			d_signal[tid + i*blockDim.x] = dval[i];
 		}
 	}
@@ -800,7 +806,7 @@ static __global__ void invDWTproductMinus2(int64_t *llint_signal, const double *
  * uses Xfer to host and then sequential max check on array from errorVector computed above
  *   called seldom (currently, every 1/50 of the total iterations), so no effect on runtime.
  */
-static __host__ float findMaxErrorHOST(float *dev_errArr, float *host_errArr, int signalSize) {
+static __host__ float findMaxErrorHOST(float *dev_errArr, float *host_errArr) {
 
 	cutilSafeCall(cudaMemcpy(host_errArr, dev_errArr, sizeof(float)*signalSize, cudaMemcpyDeviceToHost));
 	float maxVal = 0.0f;
@@ -815,9 +821,9 @@ static __host__ float findMaxErrorHOST(float *dev_errArr, float *host_errArr, in
  *function returns list of number of significant bits of a list of int64_ts
  *AS IS, list can only be as long as however many strings you can launch, now 67,107,840 on 2.0 gpus
  */
-static __global__ void computeMaxBitVector(float *dev_errArr, int64_t *llint_signal, int signalSize){
+static __global__ void computeMaxBitVector(float *dev_errArr, int64_t *llint_signal){
 	int tid = threadIdx.x + blockIdx.x*blockDim.x;
-	if (tid < signalSize){
+	if (tid < DEV_SIGNALSIZE) {
 		if (llint_signal[tid] >= 0){
 			dev_errArr[tid] = (float) __clzll(llint_signal[tid]);
 		}
@@ -879,7 +885,7 @@ static __host__ float mersenneIter() {
 
 
 	if (timing) {
-		float maxerr = findMaxErrorHOST(dev_errArr, host_errArr, signalSize);
+		float maxerr = findMaxErrorHOST(dev_errArr, host_errArr);
 		if (maxerr >= ERROR_LIMIT) {
 			if (opt_verbose)
 				printf("max abs error = %f, is too high. Exiting\n", maxerr);
@@ -887,9 +893,9 @@ static __host__ float mersenneIter() {
 		} else if (opt_verbose)
 			printf("\n[%d/50]: iteration %d: max abs error = %f", iter/(testPrime/50), iter, maxerr);
 		
-		computeMaxBitVector<<<numBlocks, T_PER_B>>>(dev_errArr, llint_signal, signalSize);
+		computeMaxBitVector<<<numBlocks, T_PER_B>>>(dev_errArr, llint_signal);
 		cutilCheckMsg("Kernel execution failed [ computeMaxBitVector ]");
-		float maxBitVector = findMaxErrorHOST(dev_errArr, host_errArr, signalSize);
+		float maxBitVector = findMaxErrorHOST(dev_errArr, host_errArr);
 		if (opt_verbose) {
 			printf("\n[%d/50]: iteration %d: max Bit Vector = %f", iter/(testPrime/50), iter, maxBitVector);
 			fflush(stdout);
@@ -900,10 +906,10 @@ static __host__ float mersenneIter() {
 	}
 
 	// REBALANCE llint TIMING
-	sliceAndDice<<<numBlocks, T_PER_B>>>(i_signal, i_hiBitArr, llint_signal, bitsPerWord8, signalSize);
+	sliceAndDice<<<numBlocks, T_PER_B>>>(i_signal, i_hiBitArr, llint_signal, bitsPerWord8);
 	cutilCheckMsg("Kernel execution failed [ sliceAndDice ]");
 
-	loadIntToDoubleIBDWT<<<numBlocks, T_PER_B/UNROLL_KERNEL>>>(d_signal, i_signal, i_hiBitArr, dev_A, signalSize);
+	loadIntToDoubleIBDWT<<<numBlocks, T_PER_B/UNROLL_KERNEL>>>(d_signal, i_signal, i_hiBitArr, dev_A);
 	cutilCheckMsg("Kernel execution failed [ loadIntToDoubleIBDWT ]");
 
 	if (timing) {
@@ -940,10 +946,9 @@ static __host__ int mallocArrays() {
 	// Memory needs:
 	// cudaMallocs: roughly 50 times the signalSize + 896 bytes, minimum 2048KiB
 	// cufft plans: roughly 32 times the signalSize, minimum 1024KiB
-	int estimated_size = max(50 * signalSize + 896, 2048*1024)
-		+ max(32 * signalSize, 1024*1024);
-	if ((int)free_mem < estimated_size) {
-		printf("Not enough available device memory (Needed: %dKiB, have: %dKiB)\n", estimated_size/1024, (int)free_mem/1024);
+	unsigned int estimated_size = max(50 * signalSize/1024 + 896, 2048) + max(32 * signalSize/1024, 1024);
+	if ((unsigned int)free_mem/1024 < estimated_size) {
+		printf("Not enough available device memory (Needed: %dKiB, have: %dKiB)\n", estimated_size, (int)free_mem/1024);
 		fflush(stdout);
 		return -1;
 	}
@@ -984,15 +989,15 @@ static __host__ int mallocArrays() {
 	cutilSafeCall(cudaMemset(dev_errArr, 0, signalSize*sizeof(float)));
 
 	// Compute word-sizes to use when dicing products to sum to int array
-	computeBitsPerWord(h_bitsPerWord, signalSize);
-	computeBitsPerWordVectors(h_bitsPerWord8, h_bitsPerWord, signalSize);
+	computeBitsPerWord(h_bitsPerWord);
+	computeBitsPerWordVectors(h_bitsPerWord8, h_bitsPerWord);
 	cutilSafeCall(cudaMemcpy(bitsPerWord8, h_bitsPerWord8, bpw_size, cudaMemcpyHostToDevice));
 
 	h_A = (double *) malloc(signalSize*sizeof(double));
 	h_Ainv = (double *) malloc(signalSize*sizeof(double));
 	
 	// compute weights in extended precision, essential for non-power-of-two signal_size
-	computeWeightVectors(h_A, h_Ainv, signalSize);
+	computeWeightVectors(h_A, h_Ainv);
 	cutilSafeCall(cudaMemcpy(dev_A, h_A, d_size, cudaMemcpyHostToDevice));
 	cutilSafeCall(cudaMemcpy(dev_Ainv, h_Ainv, d_size, cudaMemcpyHostToDevice));
 
@@ -1031,7 +1036,7 @@ static __host__ void freeArrays() {
  * Determines the best signalSize to use for a given testPrime
  * Choice based on runtime and error
  */
-static __host__ unsigned int findSignalSize() {
+static __host__ int findSignalSize() {
 	int optimal_length = 0;
 	float bestTime = 99999; // dummy value
 	uint64_t signalSize64; // need to be bigger than necessary so some of the FFTlen combinations don't overflow
@@ -1039,9 +1044,9 @@ static __host__ unsigned int findSignalSize() {
 	// Start with testing lengths between a minimum = 1/20th of the testPrime, rounded to the nearest T_PER_B multiple
 	// and a maximum = next higher power-of-two, but no higher than 1/14th of the testPrime
 	// to avoid wasting our time testing un-necessarily large sizes
-	int min_nx = ((testPrime / 20 / T_PER_B) + 1) * T_PER_B;
+	unsigned int min_nx = ((testPrime / 20 / T_PER_B) + 1) * T_PER_B;
 
-	int max_nx = 1;
+	unsigned int max_nx = 1;
 	while (max_nx < (testPrime >> 4)) // shift until max_nx is a power of two large enough to cover 1/16th the testPrime
 		max_nx <<= 1;
 	max_nx = min(max_nx, ((testPrime / 14 / T_PER_B) + 1) * T_PER_B); // but just in case it's too big, cap it at 1/14th the testPrime
@@ -1055,7 +1060,7 @@ static __host__ unsigned int findSignalSize() {
 	cutilSafeCall(cudaEventCreate(&stop_findSignalSize));
 
 restart_findSignalSize:
-	float elapsedTime, maxerr;
+	float elapsedTime, maxerr=0;
 
 	// Need to run enough iterations to build-up the error, if there is any
 	// This seems to be around 40-45 iterations in practice.
@@ -1097,7 +1102,7 @@ restart_findSignalSize:
 						for (; likely(iter < testIterations); iter++) {
 							mersenneIter<1, 0>();
 
-							float this_err = findMaxErrorHOST(dev_errArr, host_errArr, signalSize);
+							float this_err = findMaxErrorHOST(dev_errArr, host_errArr);
 							maxerr = std::max(this_err, maxerr);
 
 							if (maxerr >= ERROR_LIMIT) // no need to continue this test
@@ -1134,15 +1139,17 @@ restart_findSignalSize:
 	// If we haven't found a usable length, increase the search range slightly.
 	// Should only happen on smaller testPrimes, so won't increase run-time on larger testPrimes
 	if (optimal_length == 0) {
-		if (!opt_quiet)
-			printf("Could not find a signalSize; Increasing search range\n");
 		min_nx = max_nx;
 		max_nx = max_nx + 8*T_PER_B;
 		retry++;
-		if (retry > 10) { // Should this provide a wide enough range before bailing out?
+		if ((retry > 10) | (maxerr < 0)) { // Should this provide a wide enough range before bailing out?
 			fprintf(stderr, "Could not find a suitable signalSize, exiting\n");
 			exit (-1);
 		}
+
+		if (!opt_quiet)
+			printf("Could not find a signalSize; Increasing search range\n");
+
 		goto restart_findSignalSize;
 	}
 		
@@ -1155,7 +1162,7 @@ restart_findSignalSize:
 /**
 * errorTrial()
 */
-static __host__ float errorTrial(unsigned int testIterations) {
+static __host__ float errorTrial(int testIterations) {
 	// Run at least 100 testIterations. We'll encounter a floating point error later on if we don't
 	// main() calls us with at least 100 iterations already, so this shouldn't happen
 	if (testIterations<100)
@@ -1172,7 +1179,7 @@ static __host__ float errorTrial(unsigned int testIterations) {
 			printf("\n");
 		}
 
-		for (unsigned int i = signalSize - 8; i < signalSize; i++) {
+		for (int i = signalSize - 8; i < signalSize; i++) {
 			printf("word[%d] numbits = %d\n", i, h_bitsPerWord[i]);
 			printf("numbits of this and following 7 are: ");
 			for (int bit = 1; bit < 256; bit *= 2)
@@ -1224,9 +1231,9 @@ static __host__ float errorTrial(unsigned int testIterations) {
 	cutilSafeCall(cudaEventCreate(&stop));
 	cutilSafeCall(cudaEventRecord(start, 0));
 
-	addPseudoBalanced<<<numBlocks, T_PER_B>>>(i_signal, i_hiBitArr, signalSize);
+	addPseudoBalanced<<<numBlocks, T_PER_B>>>(i_signal, i_hiBitArr);
 	cutilCheckMsg("Kernel execution failed [ addPseudoBalanced ]");
-	rebalanceIrrIntSEQGPU<<<1, 1>>>(i_signal, bitsPerWord8, signalSize);
+	rebalanceIrrIntSEQGPU<<<1, 1>>>(i_signal, bitsPerWord8);
 	cutilCheckMsg("Kernel execution failed [ rebalanceIrrIntSEQGPU ]");
 	cutilSafeCall(cudaMemcpy(h_signalOUT, i_signal, sizeof(int)*signalSize, cudaMemcpyDeviceToHost));
 
@@ -1328,6 +1335,9 @@ static __host__ void mersenneTest(Real *cp_signal) {
 		cutilSafeCall(cudaMemcpy(d_signal, cp_signal, sizeof(Real) * signalSize, cudaMemcpyHostToDevice));
 	}    
 
+	numBlocks = signalSize/T_PER_B;
+	numFFTblocks = (signalSize/2 + 1)/T_PER_B + 1;
+
 	if (!resuming) {
 		iter = 2;
 		
@@ -1340,7 +1350,7 @@ static __host__ void mersenneTest(Real *cp_signal) {
 	float maxerr = 0.0f;
 
 
-	unsigned int last_cp_iter = iter;
+	int last_cp_iter = iter;
 
 	// Timers for displaying timing at checkpoint, and ETA to completion
 	// Only used if not quiet
@@ -1358,15 +1368,12 @@ static __host__ void mersenneTest(Real *cp_signal) {
 	sigaddset(&x, SIGTERM);
 	sigaddset(&x, SIGTSTP);
 
-	numBlocks = signalSize/T_PER_B;
-	numFFTblocks = (signalSize/2 + 1)/T_PER_B + 1;
-
 	// Loop M-2 times
 	for (; likely(iter < testPrime); iter++) {
 		// Every so often, do some error checking. Do this at every checkpoint as well
 		if (unlikely((iter % (testPrime/1000) == 0) | (iter % checkpoint_freq == 1))) {
 			mersenneIter<1, 0>();
-			maxerr = findMaxErrorHOST(dev_errArr, host_errArr, signalSize);
+			maxerr = findMaxErrorHOST(dev_errArr, host_errArr);
 			// FIXME: -Aaron: we should add a way to stop/restart if the error is too high.
 			if (unlikely(maxerr >= ERROR_LIMIT)) {
 				printf("\n\n\nError limit exceeded: %f >= %f\n\n\n", maxerr, ERROR_LIMIT);
@@ -1414,11 +1421,11 @@ static __host__ void mersenneTest(Real *cp_signal) {
 
 				if (opt_verbose) {
 					// Display current iteration's residue and error if verbose
-					addPseudoBalanced<<<numBlocks, T_PER_B>>>(i_signal, i_hiBitArr, signalSize);
+					addPseudoBalanced<<<numBlocks, T_PER_B>>>(i_signal, i_hiBitArr);
 					cutilCheckMsg("Kernel execution failed [ addPseudoBalanced ]");
 					
 					// FIXME: Timing cost of the rebalance is expensive > .5 seconds per call for 26xxxxxx exponent
-					rebalanceIrrIntSEQGPU<<<1, 1>>>(i_signal, bitsPerWord8, signalSize);
+					rebalanceIrrIntSEQGPU<<<1, 1>>>(i_signal, bitsPerWord8);
 					cutilCheckMsg("Kernel execution failed [ rebalanceIrrIntSEQGPU ]");
 					
 					cutilSafeCall(cudaMemcpy(h_signalOUT, i_signal, sizeof(int)*signalSize, cudaMemcpyDeviceToHost));
@@ -1461,16 +1468,16 @@ static __host__ void mersenneTest(Real *cp_signal) {
 
 	// DONE!  Final copy out from GPU, since not done by default as for CPU stages
 	// DO GOOD REBALANCE HERE
-	addPseudoBalanced<<<numBlocks, T_PER_B>>>(i_signal, i_hiBitArr, signalSize);
+	addPseudoBalanced<<<numBlocks, T_PER_B>>>(i_signal, i_hiBitArr);
 	cutilCheckMsg("Kernel execution failed [ addPseudoBalancd ]");
 	
-	rebalanceIrrIntSEQGPU<<<1, 1>>>(i_signal, bitsPerWord8, signalSize);
+	rebalanceIrrIntSEQGPU<<<1, 1>>>(i_signal, bitsPerWord8);
 	cutilCheckMsg("Kernel execution failed [ rebalanceIrrIntSEQGPU]");
 
 	cutilSafeCall(cudaMemcpy(h_signalOUT, i_signal, sizeof(int)*signalSize, cudaMemcpyDeviceToHost));
 
 	bool nonZeros = false;
-	for (unsigned int i = 0; i < signalSize; i++) {
+	for (int i = 0; i < signalSize; i++) {
 		if (h_signalOUT[i] > 0) {
 			nonZeros = true;
 			break;
@@ -1478,7 +1485,7 @@ static __host__ void mersenneTest(Real *cp_signal) {
 	}
 	if (nonZeros) {
 		if (testPrime < 50000 & opt_verbose) {
-			for (unsigned int i = 0; i < signalSize; i++) {
+			for (int i = 0; i < signalSize; i++) {
 				printf("%05x", h_signalOUT[i]);
 				if (i % 2 == 3)
 					printf(" ");
@@ -1519,9 +1526,9 @@ static __host__ void printFriendlyTime(char *buf, int time) {
 	sprintf(buf + length, "%02d:%02d", (time%3600)/60, time%60);
 }
 
-static __host__ Real *readCheckpoint(unsigned int *signalSize, unsigned int *resume_iter) {
+static __host__ Real *readCheckpoint(int *signalSize, int *resume_iter) {
 	FILE *fPtr;
-	unsigned int testPrime_r, signalSize_r, resumeiter_r; 
+	int testPrime_r, resumeiter_r, signalSize_r; 
 	Real *signal;
 
 	char program_name_r[16];
